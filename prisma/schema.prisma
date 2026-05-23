@@ -48,6 +48,7 @@ model Product {
   @@index([category_id])
   @@index([parent_id])
   @@index([snapshot_date])
-  @@index([catalog_id])
+  @@index([country, snapshot_date])
+  @@index([catalog_id, snapshot_date])
   @@map("products")
 }
