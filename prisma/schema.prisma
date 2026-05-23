@@ -1,0 +1,53 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Category {
+  id        Int     @id @default(autoincrement())
+  name      String  @db.VarChar(255)
+  country   String  @db.VarChar(10)
+  ml_id     String  @unique @db.VarChar(50)
+  parent_id Int?
+
+  parent   Category?  @relation("CategoryTree", fields: [parent_id], references: [id])
+  children Category[] @relation("CategoryTree")
+
+  products_as_category Product[] @relation("ProductCategory")
+  products_as_parent   Product[] @relation("ProductParentCategory")
+
+  @@index([ml_id])
+  @@index([country])
+  @@index([parent_id])
+  @@map("categories")
+}
+
+model Product {
+  id            Int       @id @default(autoincrement())
+  name          String    @db.VarChar(500)
+  price         Decimal   @db.Decimal(14, 2)
+  country       String?   @db.VarChar(10)
+  category_id   Int
+  parent_id     Int?
+  snapshot_date DateTime  @default(now()) @db.Timestamp()
+  catalog_id    String?   @db.VarChar(50)
+  listing_id    String?   @db.VarChar(50)
+  date_created  DateTime?
+  sold_count    Int?
+  rating        Decimal?  @db.Decimal(3, 2)
+  review_count  Int?
+  brand         String?   @db.VarChar(255)
+
+  category       Category  @relation("ProductCategory", fields: [category_id], references: [id])
+  parent_category Category? @relation("ProductParentCategory", fields: [parent_id], references: [id])
+
+  @@index([category_id])
+  @@index([parent_id])
+  @@index([snapshot_date])
+  @@index([catalog_id])
+  @@map("products")
+}

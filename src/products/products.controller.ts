@@ -1,0 +1,13 @@
+import { Controller, Get, Query } from '@nestjs/common';
+import { ProductsService } from './products.service';
+
+@Controller('productos')
+export class ProductsController {
+  constructor(private readonly productsService: ProductsService) {}
+
+  @Get()
+  findAll(@Query('category_id') categoryId?: string) {
+    const id = categoryId !== undefined ? parseInt(categoryId, 10) : undefined;
+    return this.productsService.findAll(id);
+  }
+}
