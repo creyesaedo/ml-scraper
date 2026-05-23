@@ -1,4 +1,4 @@
-# b2b-market-analysis
+# ML-Scraper
 
 Weekly snapshots of MercadoLibre's top-selling products per category, persisted to PostgreSQL for trend analysis. Built with NestJS + Prisma + Playwright, using Bright Data's Scraping Browser to bypass MercadoLibre's JavaScript proof-of-work challenge.
 
