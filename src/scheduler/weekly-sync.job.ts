@@ -32,13 +32,20 @@ export class WeeklySyncJob {
 
   @Cron(buildCronExpression())
   async handleWeeklySync(): Promise<void> {
-    const siteId = this.configService.get<string>('app.syncSiteId') ?? 'MLA';
-    this.logger.log(`Starting weekly sync for site ${siteId}`);
-    try {
-      const result = await this.syncRunnerService.run(siteId);
-      this.logger.log(`Weekly sync completed: ${JSON.stringify(result)}`);
-    } catch (err) {
-      this.logger.error('Weekly sync failed', err);
+    const siteIds =
+      this.configService.get<string[]>('app.snapshotSiteIds') ?? ['MLA'];
+    this.logger.log(
+      `Starting weekly snapshot for sites: ${siteIds.join(', ')}`,
+    );
+    for (const siteId of siteIds) {
+      try {
+        const result = await this.syncRunnerService.run(siteId);
+        this.logger.log(
+          `[${siteId}] Snapshot completed: ${JSON.stringify(result)}`,
+        );
+      } catch (err) {
+        this.logger.error(`[${siteId}] Snapshot failed`, err);
+      }
     }
   }
 }

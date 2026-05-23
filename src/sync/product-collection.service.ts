@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import pLimit from 'p-limit';
 import { MercadoLibreClient } from '../adapters/mercadolibre/mercadolibre.client';
 import { EMPTY_ENRICHMENT, MlScraperService } from '../adapters/scraper/ml-scraper.service';
@@ -23,6 +24,7 @@ export class ProductCollectionService {
     private readonly prisma: PrismaService,
     private readonly scraper: MlScraperService,
     private readonly mlClient: MercadoLibreClient,
+    private readonly configService: ConfigService,
   ) {}
 
   private async resolveLeafCategory(
@@ -61,8 +63,9 @@ export class ProductCollectionService {
   async collect(siteId: string): Promise<CollectionResult> {
     this.leafCategoryCache.clear();
 
-    const rootCategories = await this.prisma.category.findMany({
+    let rootCategories = await this.prisma.category.findMany({
       where: { country: siteId, parent_id: null },
+      orderBy: { id: 'asc' },
     });
 
     if (!rootCategories.length) {
@@ -72,6 +75,41 @@ export class ProductCollectionService {
         productos_guardados: 0,
         snapshot_date: new Date().toISOString(),
         errores: [`No categories found for ${siteId}. Run POST /sync/categorias first.`],
+      };
+    }
+
+    // Whitelist takes precedence over limit. If neither is set → all categories (production default).
+    const whitelistBySite =
+      this.configService.get<Record<string, string[]>>('app.snapshotCategoriesBySite') ?? {};
+    const whitelist = whitelistBySite[siteId.toUpperCase()];
+    const categoryLimitN = this.configService.get<number | null>('app.snapshotCategoryLimit');
+
+    if (whitelist?.length) {
+      const set = new Set(whitelist);
+      const before = rootCategories.length;
+      rootCategories = rootCategories.filter((c) => set.has(c.ml_id));
+      this.logger.log(
+        `[${siteId}] Whitelist active: ${rootCategories.length}/${before} categories selected (${whitelist.join(', ')})`,
+      );
+      const missing = whitelist.filter((id) => !rootCategories.some((c) => c.ml_id === id));
+      if (missing.length) {
+        this.logger.warn(`[${siteId}] Whitelisted categories not found in DB: ${missing.join(', ')}`);
+      }
+    } else if (categoryLimitN && categoryLimitN > 0) {
+      const before = rootCategories.length;
+      rootCategories = rootCategories.slice(0, categoryLimitN);
+      this.logger.log(
+        `[${siteId}] Category limit active: ${rootCategories.length}/${before} categories selected`,
+      );
+    }
+
+    if (!rootCategories.length) {
+      return {
+        site_id: siteId,
+        categorias_procesadas: 0,
+        productos_guardados: 0,
+        snapshot_date: new Date().toISOString(),
+        errores: [`No categories matched filters for ${siteId}.`],
       };
     }
 

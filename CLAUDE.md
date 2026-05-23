@@ -53,7 +53,7 @@ Playwright is required as a production dependency — `MlScraperService` connect
 
 1. **Weekly cron job** (automatic, default: Monday 3 UTC)
    - Configured via `SYNC_DAY_OF_WEEK` and `SYNC_HOUR` in `.env`
-   - `WeeklySyncJob` calls `SyncRunnerService.run(SYNC_SITE_ID)`
+   - `WeeklySyncJob` iterates over `SNAPSHOT_SITE_IDS` (comma-separated) and calls `SyncRunnerService.run(siteId)` for each
    - Runs on a fixed schedule, never blocks the API
 
 2. **Manual HTTP endpoint** (on-demand)
@@ -338,15 +338,17 @@ We tested using `context.request.get(productUrl)` (Playwright `APIRequestContext
 The application already supports multiple MercadoLibre sites without code changes:
 
 ```env
-# .env — configure which site to sync
-SYNC_SITE_ID=MLC         # Currently syncing Chile
-# Other sites: MLA (Argentina), MLB (Brazil), MLM (Mexico), MLU (Uruguay), MLP (Peru), MLV (Venezuela), etc.
+# .env — configure which sites to snapshot weekly (comma-separated)
+SNAPSHOT_SITE_IDS=MLC,MLA       # Will snapshot Chile and Argentina each week
+# Available sites: MLA (Argentina), MLB (Brazil), MLC (Chile), MLM (Mexico),
+# MLU (Uruguay), MLP (Peru), MLV (Venezuela), etc.
 ```
 
-To sync multiple sites:
-1. Run the app once with `SYNC_SITE_ID=MLC` (categories cached, products inserted)
-2. Change `.env` to `SYNC_SITE_ID=MLA`, restart, sync runs for Argentina
-3. Repeat for each site — each site's data is isolated in the same PostgreSQL database via implicit `site_id` tracking in `product.name` + `category.ml_id` (ML IDs are unique per site)
+Behavior:
+- **Categories** are always synced for **all** MercadoLibre sites via the official API (cheap, no scraping). `SNAPSHOT_SITE_IDS` does **not** filter categories.
+- **Products** (the costly Bright Data scraping step) only run for sites listed in `SNAPSHOT_SITE_IDS`.
+- The weekly cron iterates over each listed site sequentially; a failure on one site does not stop the others.
+- Each site's data lives in the same PostgreSQL database — isolated by `category.country` and unique `ml_id` per site.
 
 ### Planned: Multi-platform support
 
@@ -394,7 +396,9 @@ Defined in `src/config/app.config.ts`, read from `.env`:
 | `ML_CLIENT_SECRET` | `""` | MercadoLibre OAuth2 client secret |
 | `ML_BASE_URL` | `https://api.mercadolibre.com` | ML API base URL |
 | `BRIGHTDATA_SCRAPING_BROWSER_WS` | `""` | Bright Data Scraping Browser WSS endpoint (CDP) |
-| `SYNC_SITE_ID` | `MLA` | MercadoLibre site to sync |
+| `SNAPSHOT_SITE_IDS` | `MLA` | Comma-separated MercadoLibre sites to snapshot weekly (`MLC,MLA,...`). Does not affect category sync (always runs for all sites). |
+| `SNAPSHOT_CATEGORY_LIMIT` | unset | **Dev only.** Scrape only the first N parent categories per site (by `id` ASC). Unset/0 → all categories. |
+| `SNAPSHOT_CATEGORIES_<SITE>` | unset | **Dev only.** Comma-separated whitelist of parent `ml_id`s for that site (e.g. `SNAPSHOT_CATEGORIES_MLC=MLC1574,MLC1648`). Takes precedence over `SNAPSHOT_CATEGORY_LIMIT`. |
 | `SYNC_DAY_OF_WEEK` | `mon` | Day for weekly cron (mon–sun) |
 | `SYNC_HOUR` | `3` | UTC hour for weekly cron |
 

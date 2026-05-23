@@ -78,7 +78,7 @@ npm run start:dev
 | `ML_CLIENT_ID` | `""` | no | MercadoLibre OAuth2 client ID |
 | `ML_CLIENT_SECRET` | `""` | no | MercadoLibre OAuth2 client secret |
 | `ML_BASE_URL` | `https://api.mercadolibre.com` | no | ML API base URL |
-| `SYNC_SITE_ID` | `MLA` | no | MercadoLibre site to sync (`MLC`, `MLA`, `MLB`, etc.) |
+| `SNAPSHOT_SITE_IDS` | `MLA` | no | Comma-separated MercadoLibre sites to snapshot weekly (`MLC,MLA,MLB`). Categories are synced for all sites regardless. |
 | `SYNC_DAY_OF_WEEK` | `mon` | no | Day of week for the weekly cron (`mon`–`sun`) |
 | `SYNC_HOUR` | `3` | no | UTC hour for the weekly cron |
 
