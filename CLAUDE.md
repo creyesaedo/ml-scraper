@@ -49,60 +49,200 @@ Playwright is required as a production dependency — `MlScraperService` connect
 
 ## Program flow
 
+### Execution triggers
+
+1. **Weekly cron job** (automatic, default: Monday 3 UTC)
+   - Configured via `SYNC_DAY_OF_WEEK` and `SYNC_HOUR` in `.env`
+   - `WeeklySyncJob` calls `SyncRunnerService.run(SYNC_SITE_ID)`
+   - Runs on a fixed schedule, never blocks the API
+
+2. **Manual HTTP endpoint** (on-demand)
+   - `POST /sync/run/:siteId` — full cycle (categories + products)
+   - For testing/debugging only — production should use the cron job (takes ~2-3 hours for 484 categories)
+
+### Synchronization flow
+
 ```
 TRIGGER: POST /sync/run/:siteId  OR  weekly cron (WeeklySyncJob)
          │
          ▼
-   SyncRunnerService.run()
+   SyncRunnerService.run(siteId)
          │
-         ├─ DB has 0 categories?
-         │   └─ YES → CategorySyncService.sync()
+         ├─ DB has 0 categories for this site?
+         │   └─ YES → CategorySyncService.sync(siteId)
          │               ├─ GET /sites/{siteId}/categories  (ML API, OAuth2)
-         │               ├─ UPSERT root categories → DB
-         │               └─ p-limit(8): GET /categories/{id} per root
-         │                   └─ UPSERT subcategories → DB
+         │               │     Returns: all parent categories for the site (e.g. MLC = Chile)
+         │               ├─ UPSERT root categories → categories table
+         │               │     (parent_id = null, ml_id = MercadoLibre category ID)
+         │               └─ p-limit(8): parallel per root category
+         │                   └─ GET /categories/{parent_id} (ML API, OAuth2)
+         │                       Returns: children of this parent category
+         │                       UPSERT → categories table (parent_id = root.id)
          │
-         └─ ProductCollectionService.collect()
-                 ├─ SELECT parent categories FROM DB
-                 └─ p-limit(3): per category
+         └─ ProductCollectionService.collect(siteId)
+                 │
+                 ├─ SELECT all parent categories FROM categories table
+                 │     WHERE parent_id IS NULL AND site_id = siteId
+                 │
+                 └─ p-limit(3): process 3 categories in parallel
                          │
-                         ├─ MlScraperService.scrapeCategoryWithProducts()
-                         │   ── ONE Scraping Browser CDP session for the whole category ──
-                         │       ├─ chromium.connectOverCDP(BRIGHTDATA_SCRAPING_BROWSER_WS)
-                         │       ├─ context.route(...) → block images, fonts, media,
-                         │       │   analytics/tracking domains (saves ~50% bandwidth)
-                         │       ├─ Page #1: GET /mas-vendidos/{ml_id}
-                         │       │     → Bright Data resuelve PoW challenge automáticamente
-                         │       │     → cheerio extrae 20 productos: name, price,
-                         │       │       catalog_id, listing_id, product_url
-                         │       └─ p-limit(8): scrapeProductPageInContext()
-                         │             ├─ context.newPage() (shared JS cache)
-                         │             ├─ page.route('**/*') aborts everything except
-                         │             │   the document → ~6.7 MB total per category
-                         │             ├─ page.goto(product_url)
-                         │             └─ regex sobre HTML inline extrae:
-                         │                  sold_count, rating, review_count, brand,
-                         │                  catalogProductId, categoryId (leaf)
-                         │
-                         ├─ p-limit(8): MercadoLibreClient.getCatalogProduct() per product
-                         │     └─ GET /products/{catalog_id} (ML API, OAuth2) → date_created
-                         │
-                         ├─ resolveLeafCategory(): UPSERT leaf category (parent_id=root)
-                         │   via ML API GET /categories/{leaf_id} + DB cache per run
-                         │
-                         └─ INSERT snapshots → products table
-                              (category_id = leaf, parent_id = root when leaf found;
-                               category_id = root, parent_id = null otherwise)
+                         └─ Per category:
+                             │
+                             ├─ MlScraperService.scrapeCategoryWithProducts(siteId, categoryMlId)
+                             │   ── ONE Scraping Browser CDP session for entire category ──
+                             │   ├─ chromium.connectOverCDP(BRIGHTDATA_SCRAPING_BROWSER_WS)
+                             │   ├─ browser context = shared for all 21 navigations
+                             │   │
+                             │   ├─ Step 1: Scrape category page
+                             │   │   ├─ page.goto('https://www.{domain}/mas-vendidos/{categoryMlId}')
+                             │   │   │     Bright Data auto-solves PoW challenge
+                             │   │   ├─ waitForSelector('li.ui-search-layout__item', 15s timeout)
+                             │   │   └─ cheerio parses HTML → 20 products
+                             │   │       Extracts: name, price, catalog_id, listing_id, product_url
+                             │   │
+                             │   └─ Step 2: Scrape 20 product pages in parallel (p-limit(8))
+                             │       ├─ Per product:
+                             │       │   ├─ context.newPage() (shared JS bundle cache)
+                             │       │   ├─ page.route('**/*', ...) → strict blocking
+                             │       │   │     Only document requests allowed
+                             │       │   │     Everything else (JS, CSS, images) aborted
+                             │       │   ├─ page.goto(product_url)
+                             │       │   ├─ Extract enrichment via regex on raw HTML
+                             │       │   │     sold_count: "+X mil vendidos" badge
+                             │       │   │     rating, review_count: JSON script tags
+                             │       │   │     brand, catalogProductId, categoryId (leaf)
+                             │       │   └─ Return ProductEnrichment or EMPTY_ENRICHMENT
+                             │       │
+                             │       └─ Returns: Map<productUrl, ProductEnrichment>
+                             │
+                             ├─ Parallel: MercadoLibreClient.getCatalogProduct() for each product
+                             │   ├─ Per product with catalog_id:
+                             │   │   └─ GET /products/{catalog_id} (ML API, OAuth2)
+                             │   │       Returns: date_created (when product was listed)
+                             │   └─ Runs in parallel with scraping via p-limit(8)
+                             │
+                             ├─ resolveLeafCategory() for each product's leaf category
+                             │   ├─ If categoryId (leaf) not in DB:
+                             │   │   ├─ GET /categories/{categoryId} (ML API, OAuth2)
+                             │   │   │     Returns: category metadata
+                             │   │   └─ UPSERT → categories table
+                             │   │       (parent_id = root.id, ml_id = categoryId)
+                             │   └─ Cached per sync run to avoid duplicate API calls
+                             │
+                             └─ INSERT product snapshots → products table
+                                 ├─ snapshot_date = TODAY
+                                 ├─ category_id = leaf category ID (if resolved) or root
+                                 ├─ parent_id = root category ID (if leaf found) or NULL
+                                 ├─ enrichment fields: sold_count, rating, review_count,
+                                 │   brand, date_created, catalog_id, listing_id
+                                 └─ Note: immutable rows — same product + same date = new insert
+                                     (enables price/ranking history)
+```
 
-HTTP query endpoints (read-only, no side effects):
-  GET /health                      → { status: 'ok' }
-  GET /categorias?solo_padres=true → categories from DB
-  GET /productos?category_id=123   → product snapshots from DB
+### HTTP endpoints
 
-Manual sync endpoints:
-  POST /sync/run/:siteId           → full cycle (categories + products)
-  POST /sync/categorias/:siteId    → categories only
-  POST /sync/productos/:siteId     → products only
+#### Health check
+```http
+GET /health
+→ 200 OK
+{
+  "status": "ok"
+}
+```
+
+#### Category queries (read-only)
+```http
+GET /categorias
+→ 200 OK — all categories in DB
+[
+  {
+    "id": 1,
+    "ml_id": "MLC1574",
+    "parent_id": null,
+    "name": "Electrónica",
+    ...
+  },
+  ...
+]
+
+GET /categorias?solo_padres=true
+→ 200 OK — only root categories (parent_id IS NULL)
+[
+  {
+    "id": 1,
+    "ml_id": "MLC1574",
+    "parent_id": null,
+    ...
+  },
+  ...
+]
+```
+
+#### Product snapshots (read-only)
+```http
+GET /productos?category_id=123
+→ 200 OK — all product snapshots for this category
+[
+  {
+    "id": 1,
+    "name": "iPhone 15",
+    "price": "499999",
+    "snapshot_date": "2026-05-23",
+    "sold_count": 2500,
+    "rating": 4.8,
+    "review_count": 342,
+    "brand": "Apple",
+    "category_id": 456,
+    "parent_id": 1,
+    "date_created": "2024-01-15T10:30:00Z",
+    ...
+  },
+  ...
+]
+```
+
+#### Manual sync (on-demand, for testing only)
+```http
+POST /sync/run/:siteId
+Body: {} (empty)
+→ 202 Accepted / 200 OK (sync starts immediately, runs in background)
+{
+  "message": "Sync started for MLC",
+  "siteId": "MLC",
+  "timestamp": "2026-05-23T10:00:00Z",
+  "categories": {
+    "synced": 250,
+    "errors": 2,
+    "errores": [
+      { "category": "MLC9999", "error": "No /mas-vendidos page" }
+    ]
+  },
+  "products": {
+    "inserted": 4850,
+    "errors": 12
+  },
+  "duration_ms": 7200000
+}
+
+POST /sync/categorias/:siteId
+Body: {}
+→ Sync categories only (skip product collection)
+{
+  "message": "Category sync completed for MLC",
+  "siteId": "MLC",
+  "categories": { "synced": 250, "errors": 2 },
+  ...
+}
+
+POST /sync/productos/:siteId
+Body: {}
+→ Sync products only (categories must already exist in DB)
+{
+  "message": "Product collection completed for MLC",
+  "siteId": "MLC",
+  "products": { "inserted": 4850, "errors": 12 },
+  ...
+}
 ```
 
 ## Architecture
@@ -191,6 +331,58 @@ Each category requires one Scraping Browser session that does 21 navigations (1 
 ### `context.request.get()` cannot bypass the browser
 We tested using `context.request.get(productUrl)` (Playwright `APIRequestContext`) to skip browser rendering on product pages. Even with bypass cookies already in the context, ML's CloudFront/anti-bot serves the PoW challenge page (~5.8 KB) instead of the real product page. The browser fingerprint (TLS, HTTP/2, runtime JS snoopy signal) is part of the validation. Bright Data's challenge solver only kicks in on `page.goto()` navigations.
 
+## Scaling to multiple sites & platforms
+
+### Current: Multi-site support (MercadoLibre only)
+
+The application already supports multiple MercadoLibre sites without code changes:
+
+```env
+# .env — configure which site to sync
+SYNC_SITE_ID=MLC         # Currently syncing Chile
+# Other sites: MLA (Argentina), MLB (Brazil), MLM (Mexico), MLU (Uruguay), MLP (Peru), MLV (Venezuela), etc.
+```
+
+To sync multiple sites:
+1. Run the app once with `SYNC_SITE_ID=MLC` (categories cached, products inserted)
+2. Change `.env` to `SYNC_SITE_ID=MLA`, restart, sync runs for Argentina
+3. Repeat for each site — each site's data is isolated in the same PostgreSQL database via implicit `site_id` tracking in `product.name` + `category.ml_id` (ML IDs are unique per site)
+
+### Planned: Multi-platform support
+
+To add new platforms (Amazon, Shopee, Tokopedia, etc.):
+
+**Phase 1: Adapter pattern** (non-invasive)
+- Create `src/adapters/shopee/`, `src/adapters/tokopedia/`, etc.
+- Each adapter exports `Scraper` interface: `async getCategories(siteId)`, `async getProductsForCategory(categoryId)`, etc.
+- Keep `MercadoLibreAdapter` in `src/adapters/mercadolibre/`
+- No changes to core services (`ProductCollectionService`, `SyncRunnerService`)
+
+**Phase 2: Platform abstraction** (optional, if 3+ platforms)
+- Add `platform` column to `categories` and `products` tables
+- Extend `POST /sync/run/:platform/:siteId`
+- Router selects adapter based on platform name
+
+**Current approach is MercadoLibre-only**: The scraper uses ML-specific selectors (`.poly-component__title`, `.ui-search-layout__item`), ML API endpoints, and ML site domains. To add another platform, write a new `Scraper` service for that platform and wire it into `ProductCollectionService`.
+
+## Snapshot frequency recommendation
+
+**Recommended: Weekly (current default)**
+- Captures product ranking shifts, reviews accumulation, pricing trends
+- Typical MercadoLibre dynamics: ~7–10 day cycles for top-seller rotation
+- Cost: ~$26/sync at $8/GB (484 categories × 6.76 MB = 3.27 GB)
+- Per year: ~52 snapshots/category = good granularity for year-over-year analysis
+
+**For additional granularity** (e.g., mid-week snapshots):
+- Add a second cron job via environment config (e.g., Thursday 15 UTC)
+- Cost: ~$52/week total (~$2,700/year)
+- Useful if analyzing week-over-week volatility or fast-moving categories
+
+**Not recommended:**
+- **Daily**: $182/week — too expensive for minimal incremental insight
+- **Monthly**: Misses dynamic marketplace shifts; only good for historical snapshots
+- **Quarterly**: Too coarse for market analysis
+
 ## Relevant settings
 
 Defined in `src/config/app.config.ts`, read from `.env`:
@@ -215,6 +407,86 @@ Defined in `src/config/app.config.ts`, read from `.env`:
 ## Code conventions
 
 - **Everything in English**: all identifiers (variables, functions, classes, parameters, constants) and DB column names must be in English, no exceptions.
+
+## Monitoring & debugging
+
+### Logs during sync
+
+All sync operations log to stdout/stderr:
+
+```
+[NestApplication] Nest application successfully started
+[WeeklySyncJob] Weekly sync triggered for MLC
+[SyncRunnerService] Starting sync for MLC
+[CategorySyncService] Syncing categories for MLC
+[MercadoLibreClient] OAuth token refreshed
+[CategorySyncService] ✓ 250 root categories synced
+[ProductCollectionService] Starting product collection (250 categories)
+[ProductCollectionService] [MLC1512] → 20 products
+[MlScraperService] [MLC1512] sold_count=2450, rating=4.8, reviews=342
+[ProductCollectionService] [MLC1512] Leaf category MLC1234 → UPSERT
+[ProductCollectionService] ✓ Inserted 4850 product snapshots
+[SyncRunnerService] Sync completed in 7200000ms (2h 0m)
+```
+
+Key log levels:
+- **LOG**: Normal progress (categories synced, products found)
+- **WARN**: Recoverable issues (category has 0 products, product page too small)
+- **ERROR**: Failures that don't block the sync (product scrape timeout, API call failed, logged and skipped)
+
+### Checking sync status in PostgreSQL
+
+```sql
+-- Last 10 product inserts per category
+SELECT category_id, COUNT(*) as count, MAX(snapshot_date) as latest
+FROM products
+GROUP BY category_id
+ORDER BY latest DESC
+LIMIT 10;
+
+-- Products missing enrichment (null sold_count, etc.)
+SELECT COUNT(*) as missing_enrichment
+FROM products
+WHERE snapshot_date = CURRENT_DATE
+  AND sold_count IS NULL;
+
+-- Average products per category
+SELECT category_id, COUNT(*) as total_snapshots, COUNT(DISTINCT snapshot_date) as snapshot_count
+FROM products
+GROUP BY category_id
+ORDER BY snapshot_count DESC;
+```
+
+### Triggering manual sync for testing
+
+```bash
+# Via HTTP (requires API running on localhost:8000)
+curl -X POST http://localhost:8000/sync/run/MLC
+
+# Via Prisma Studio to inspect results
+npx prisma studio
+  # Opens http://localhost:5555
+  # Browse tables: categories, products
+```
+
+### Scheduler configuration in code
+
+See `src/scheduler/weekly-sync.job.ts`:
+
+```typescript
+@Cron(CronExpression.EVERY_WEEK)
+// Recurrence: once per week, day specified by SYNC_DAY_OF_WEEK
+// Time: SYNC_HOUR (UTC)
+async handleCron() {
+  // Wraps SyncRunnerService.run() in try/catch
+  // A sync failure never crashes the scheduler
+}
+```
+
+To change schedule at runtime (without .env restart):
+- Modify `SYNC_DAY_OF_WEEK` and `SYNC_HOUR` in `.env`
+- Restart the application: `docker-compose restart api` or `npm run start:dev`
+- Scheduler loads config on startup, no hot-reload
 
 ## Tool usage
 
