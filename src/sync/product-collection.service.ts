@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import pLimit from 'p-limit';
+import { HolidaysClient } from '../adapters/holidays/holidays.client';
 import { MercadoLibreClient } from '../adapters/mercadolibre/mercadolibre.client';
 import { EMPTY_ENRICHMENT, MlScraperService } from '../adapters/scraper/ml-scraper.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -19,13 +20,65 @@ export class ProductCollectionService {
 
   // Cache per collect() run to avoid redundant DB/API calls
   private leafCategoryCache = new Map<string, number | null>();
+  private sellerCache = new Map<string, number>();
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly scraper: MlScraperService,
     private readonly mlClient: MercadoLibreClient,
+    private readonly holidays: HolidaysClient,
     private readonly configService: ConfigService,
   ) {}
+
+  private async upsertSeller(
+    enrichment: {
+      seller_ml_id: string | null;
+      seller_nickname: string | null;
+      seller_is_official_store: boolean;
+      seller_power_status: string | null;
+      seller_total_products: number | null;
+      seller_total_sales: number | null;
+    },
+    country: string,
+  ): Promise<number | null> {
+    if (!enrichment.seller_ml_id) return null;
+    if (this.sellerCache.has(enrichment.seller_ml_id)) {
+      return this.sellerCache.get(enrichment.seller_ml_id)!;
+    }
+
+    try {
+      const now = new Date();
+      const seller = await this.prisma.seller.upsert({
+        where: { ml_seller_id: enrichment.seller_ml_id },
+        create: {
+          ml_seller_id: enrichment.seller_ml_id,
+          nickname: enrichment.seller_nickname,
+          is_official_store: enrichment.seller_is_official_store,
+          power_seller_status: enrichment.seller_power_status,
+          total_products: enrichment.seller_total_products,
+          total_sales: enrichment.seller_total_sales,
+          country,
+          first_seen: now,
+          last_seen: now,
+        },
+        update: {
+          nickname: enrichment.seller_nickname,
+          is_official_store: enrichment.seller_is_official_store,
+          power_seller_status: enrichment.seller_power_status,
+          total_products: enrichment.seller_total_products,
+          total_sales: enrichment.seller_total_sales,
+          last_seen: now,
+        },
+      });
+      this.sellerCache.set(enrichment.seller_ml_id, seller.id);
+      return seller.id;
+    } catch (err) {
+      this.logger.warn(
+        `Failed to upsert seller ${enrichment.seller_ml_id}: ${(err as Error).message}`,
+      );
+      return null;
+    }
+  }
 
   private async resolveLeafCategory(
     leafMlId: string,
@@ -62,6 +115,7 @@ export class ProductCollectionService {
 
   async collect(siteId: string): Promise<CollectionResult> {
     this.leafCategoryCache.clear();
+    this.sellerCache.clear();
 
     let rootCategories = await this.prisma.category.findMany({
       where: { country: siteId, parent_id: null },
@@ -116,6 +170,7 @@ export class ProductCollectionService {
     const categoryLimit = pLimit(3);
     const productLimit = pLimit(8);
     const snapshotDate = new Date();
+    const holidayName = await this.holidays.getHolidayName(snapshotDate, siteId);
     let totalProducts = 0;
     const errors: string[] = [];
 
@@ -166,12 +221,15 @@ export class ProductCollectionService {
                   }
                 }
 
+                const seller_id = await this.upsertSeller(pageData, siteId);
+
                 return {
                   ...p,
                   catalog_id: effectiveCatalogId,
                   date_created,
                   category_id,
                   parent_id,
+                  seller_id,
                   ...pageData,
                 };
               }),
@@ -185,14 +243,15 @@ export class ProductCollectionService {
               country: siteId,
               category_id: p.category_id,
               parent_id: p.parent_id,
+              seller_id: p.seller_id,
               snapshot_date: snapshotDate,
               catalog_id: p.catalog_id,
-              listing_id: p.listing_id,
               date_created: p.date_created,
               sold_count: p.sold_count,
               rating: p.rating,
               review_count: p.review_count,
               brand: p.brand,
+              holiday_name: holidayName,
             })),
           });
 

@@ -33,22 +33,44 @@ model Product {
   country       String?   @db.VarChar(10)
   category_id   Int
   parent_id     Int?
+  seller_id     Int?
   snapshot_date DateTime  @default(now()) @db.Timestamp()
   catalog_id    String?   @db.VarChar(50)
-  listing_id    String?   @db.VarChar(50)
   date_created  DateTime?
   sold_count    Int?
   rating        Decimal?  @db.Decimal(3, 2)
   review_count  Int?
   brand         String?   @db.VarChar(255)
+  holiday_name  String?   @db.VarChar(255)
 
-  category       Category  @relation("ProductCategory", fields: [category_id], references: [id])
+  category        Category @relation("ProductCategory", fields: [category_id], references: [id])
   parent_category Category? @relation("ProductParentCategory", fields: [parent_id], references: [id])
+  seller          Seller?   @relation(fields: [seller_id], references: [id])
 
   @@index([category_id])
   @@index([parent_id])
   @@index([snapshot_date])
   @@index([country, snapshot_date])
   @@index([catalog_id, snapshot_date])
+  @@index([seller_id])
   @@map("products")
+}
+
+model Seller {
+  id                  Int      @id @default(autoincrement())
+  ml_seller_id        String   @unique @db.VarChar(50)
+  nickname            String?  @db.VarChar(255)
+  is_official_store   Boolean  @default(false)
+  power_seller_status String?  @db.VarChar(50)
+  total_products      Int?
+  total_sales         Int?
+  country             String?  @db.VarChar(10)
+  first_seen          DateTime @default(now())
+  last_seen           DateTime @default(now())
+
+  products Product[]
+
+  @@index([country])
+  @@index([power_seller_status])
+  @@map("sellers")
 }

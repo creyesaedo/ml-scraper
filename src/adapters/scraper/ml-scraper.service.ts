@@ -9,7 +9,6 @@ export interface ScrapedProduct {
   name: string;
   price: string;
   catalog_id: string | null;
-  listing_id: string | null;
   product_url: string | null;
 }
 
@@ -21,6 +20,12 @@ export interface ProductEnrichment {
   date_created_from_page: string | null;
   catalog_product_id_from_page: string | null;
   leaf_category_id: string | null;
+  seller_ml_id: string | null;
+  seller_nickname: string | null;
+  seller_is_official_store: boolean;
+  seller_power_status: string | null;
+  seller_total_products: number | null;
+  seller_total_sales: number | null;
 }
 
 const SITE_DOMAINS: Record<string, string> = {
@@ -44,6 +49,12 @@ export const EMPTY_ENRICHMENT: ProductEnrichment = {
   date_created_from_page: null,
   catalog_product_id_from_page: null,
   leaf_category_id: null,
+  seller_ml_id: null,
+  seller_nickname: null,
+  seller_is_official_store: false,
+  seller_power_status: null,
+  seller_total_products: null,
+  seller_total_sales: null,
 };
 
 @Injectable()
@@ -218,14 +229,12 @@ export class MlScraperService {
 
         const href = $(el).find('a.poly-component__title').attr('href') ?? '';
         const catalogMatch = href.match(/\/p\/(ML[A-Z][0-9]+)/);
-        const widMatch = href.match(/[?&]wid=(ML[A-Z][0-9]+)/);
 
         if (name) {
           products.push({
             name,
             price: priceRaw || '0',
             catalog_id: catalogMatch?.[1] ?? null,
-            listing_id: widMatch?.[1] ?? null,
             product_url: href ? href.split('#')[0] : null,
           });
         }
@@ -275,6 +284,108 @@ export class MlScraperService {
     const categoryIdMatch = html.match(/"categoryId"\s*:\s*"(ML[A-Z][0-9]+)"/);
     if (categoryIdMatch) leaf_category_id = categoryIdMatch[1];
 
-    return { sold_count, rating, review_count, brand, date_created_from_page, catalog_product_id_from_page, leaf_category_id };
+    const seller = this.parseSellerFromHtml(html);
+
+    return {
+      sold_count,
+      rating,
+      review_count,
+      brand,
+      date_created_from_page,
+      catalog_product_id_from_page,
+      leaf_category_id,
+      ...seller,
+    };
+  }
+
+  private parseSellerFromHtml(html: string): {
+    seller_ml_id: string | null;
+    seller_nickname: string | null;
+    seller_is_official_store: boolean;
+    seller_power_status: string | null;
+    seller_total_products: number | null;
+    seller_total_sales: number | null;
+  } {
+    // seller_id: try multiple patterns (JSON state + URL fallback)
+    let seller_ml_id: string | null = null;
+    const sellerIdPatterns = [
+      /"seller_id"\s*:\s*(\d{4,})/,
+      /"seller"\s*:\s*\{[^}]*?"id"\s*:\s*(\d{4,})/,
+      /_CustId_(\d{4,})/,
+      /[?&]seller_id=(\d{4,})/,
+    ];
+    for (const re of sellerIdPatterns) {
+      const m = html.match(re);
+      if (m) {
+        seller_ml_id = m[1];
+        break;
+      }
+    }
+
+    // nickname — try multiple patterns; ML wraps text and uses several JSON shapes
+    let seller_nickname: string | null = null;
+    const nicknamePatterns = [
+      /"nickname"\s*:\s*"([^"]+)"/,
+      /\\"nickname\\"\s*:\s*\\"([^"\\]+)\\"/, // escaped JSON inside <script> string
+      /"sellerName"\s*:\s*"([^"]+)"/,
+      /"seller_name"\s*:\s*"([^"]+)"/,
+      /Vendido por[^<]*<[^>]*>([^<]{2,})</i,
+      /data-testid="seller-name"[^>]*>([^<]+)/i,
+    ];
+    for (const re of nicknamePatterns) {
+      const m = html.match(re);
+      if (m && m[1].trim()) {
+        seller_nickname = m[1].trim();
+        break;
+      }
+    }
+
+    // official store: presence of non-null official_store_id, or text marker
+    let seller_is_official_store = false;
+    const officialIdMatch = html.match(/"official_store_id"\s*:\s*(\d+)/);
+    if (officialIdMatch) seller_is_official_store = true;
+    else if (/Tienda oficial/i.test(html)) seller_is_official_store = true;
+
+    // power-seller status: ML exposes platinum/gold/silver in lowercase JSON
+    let seller_power_status: string | null = null;
+    const powerJsonMatch = html.match(/"power_seller_status"\s*:\s*"([^"]+)"/);
+    if (powerJsonMatch) {
+      seller_power_status = powerJsonMatch[1].toLowerCase();
+    } else {
+      // Fallback: render-text patterns like "MercadoLíder Platinum" / "MercadoLíder Gold"
+      const textMatch = html.match(/MercadoL[ií]der\s+(Platinum|Gold|Silver)/i);
+      if (textMatch) seller_power_status = textMatch[1].toLowerCase();
+      else if (/MercadoL[ií]der/i.test(html)) seller_power_status = 'mercadolider';
+    }
+
+    // total_products: text-rendered "+100 Productos"
+    let seller_total_products: number | null = null;
+    const productsMatch = html.match(/\+?\s*([\d.,]+)\s*([Pp]roductos?)/);
+    if (productsMatch) {
+      const n = parseFloat(productsMatch[1].replace(/\./g, '').replace(',', '.'));
+      if (Number.isFinite(n)) seller_total_products = Math.round(n);
+    }
+
+    // total_sales: text-rendered "+5 mil Ventas" / "+1 millón Ventas"
+    let seller_total_sales: number | null = null;
+    const salesMatch = html.match(/\+?\s*([\d.,]+)\s*(mil(?:l[oó]n)?)?\s*[Vv]entas/);
+    if (salesMatch) {
+      const raw = parseFloat(salesMatch[1].replace(/\./g, '').replace(',', '.'));
+      const suffix = (salesMatch[2] ?? '').toLowerCase();
+      if (Number.isFinite(raw)) {
+        if (suffix.startsWith('mill')) seller_total_sales = Math.round(raw * 1_000_000);
+        else if (suffix === 'mil') seller_total_sales = Math.round(raw * 1_000);
+        else seller_total_sales = Math.round(raw);
+      }
+    }
+
+    return {
+      seller_ml_id,
+      seller_nickname,
+      seller_is_official_store,
+      seller_power_status,
+      seller_total_products,
+      seller_total_sales,
+    };
   }
 }
