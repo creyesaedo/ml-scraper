@@ -39,6 +39,7 @@ model Product {
   seller_id     Int?
   snapshot_date DateTime  @default(now()) @db.Timestamp()
   catalog_id    String?   @db.VarChar(50)
+  ml_public_id  String?   @db.VarChar(50)
   date_created  DateTime?
   sold_count    Int?
   rating        Decimal?  @db.Decimal(3, 2)

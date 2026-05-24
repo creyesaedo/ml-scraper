@@ -17,6 +17,7 @@ export interface ProductEnrichment {
   brand: string | null;
   date_created_from_page: string | null;
   catalog_product_id_from_page: string | null;
+  ml_public_id: string | null;
   leaf_category_id: string | null;
   original_price: number | null;
   discount_pct: number | null;
@@ -38,6 +39,7 @@ export const EMPTY_ENRICHMENT: ProductEnrichment = {
   brand: null,
   date_created_from_page: null,
   catalog_product_id_from_page: null,
+  ml_public_id: null,
   leaf_category_id: null,
   original_price: null,
   discount_pct: null,
@@ -155,6 +157,17 @@ export function parseProductPageHtml(html: string): ProductEnrichment {
   const categoryIdMatch = html.match(/"categoryId"\s*:\s*"(ML[A-Z][0-9]+)"/);
   if (categoryIdMatch) leaf_category_id = categoryIdMatch[1];
 
+  // ML's per-listing "item ID" shown on the product page as "Publicación #NNNNNN".
+  // Distinct from catalog_id (catalog product) — this identifies the specific listing.
+  let ml_public_id: string | null = null;
+  const publicIdMatch = html.match(/Publicaci[oó]n\s*#\s*(\d{6,})/i);
+  if (publicIdMatch) {
+    ml_public_id = publicIdMatch[1];
+  } else {
+    const itemIdMatch = html.match(/"item_id"\s*:\s*"ML[A-Z]?(\d{6,})"/);
+    if (itemIdMatch) ml_public_id = itemIdMatch[1];
+  }
+
   // Original price (previous_price.value just before current_price.value in the
   // buy-box price block). Captured as a raw number — caller stores as decimal.
   let original_price: number | null = null;
@@ -205,6 +218,7 @@ export function parseProductPageHtml(html: string): ProductEnrichment {
     brand,
     date_created_from_page,
     catalog_product_id_from_page,
+    ml_public_id,
     leaf_category_id,
     original_price,
     discount_pct,

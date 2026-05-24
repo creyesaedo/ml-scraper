@@ -289,6 +289,7 @@ export class ProductCollectionService {
                 seller_id: p.seller_id,
                 snapshot_date: snapshotDate,
                 catalog_id: p.catalog_id,
+                ml_public_id: p.ml_public_id,
                 date_created: p.date_created,
                 sold_count: p.sold_count,
                 rating: p.rating,
