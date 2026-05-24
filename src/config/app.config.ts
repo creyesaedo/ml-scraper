@@ -1,6 +1,9 @@
 import { registerAs } from '@nestjs/config';
 
+export type AppMode = 'DEVELOPMENT' | 'PRODUCTION';
+
 export interface AppConfig {
+  appMode: AppMode;
   databaseUrl: string;
   mlClientId: string;
   mlClientSecret: string;
@@ -17,12 +20,12 @@ export interface AppConfig {
   syncHour: number;
 }
 
-function parseSiteIds(raw: string | undefined): string[] {
-  if (!raw) return ['MLA'];
-  return raw
-    .split(',')
-    .map((s) => s.trim().toUpperCase())
-    .filter((s) => s.length > 0);
+const PROD_CORE_SITES = ['MLA', 'MLB', 'MLC', 'MLM', 'MCO', 'MPE', 'MLU', 'MLV'];
+const DEV_SAMPLE_SITE = 'MLC';
+const DEV_SAMPLE_CATEGORY = 'MLC1648';
+
+function parseAppMode(raw: string | undefined): AppMode {
+  return raw?.toUpperCase() === 'PRODUCTION' ? 'PRODUCTION' : 'DEVELOPMENT';
 }
 
 function parseCategoryLimit(raw: string | undefined): number | null {
@@ -31,41 +34,40 @@ function parseCategoryLimit(raw: string | undefined): number | null {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
-// Reads all SNAPSHOT_CATEGORIES_<SITE> env vars into a per-site whitelist map.
-// Example: SNAPSHOT_CATEGORIES_MLC=MLC1574,MLC1648 → { MLC: ['MLC1574', 'MLC1648'] }
-function parseCategoriesBySite(): Record<string, string[]> {
-  const prefix = 'SNAPSHOT_CATEGORIES_';
-  const result: Record<string, string[]> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (!key.startsWith(prefix) || !value) continue;
-    const site = key.slice(prefix.length).toUpperCase();
-    const ids = value
-      .split(',')
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0);
-    if (ids.length) result[site] = ids;
-  }
-  return result;
-}
-
 export default registerAs(
   'app',
-  (): AppConfig => ({
-    databaseUrl:
-      process.env.DATABASE_URL ??
-      'postgresql://postgres:postgres@localhost:5432/market_analysis',
-    mlClientId: process.env.ML_CLIENT_ID ?? '',
-    mlClientSecret: process.env.ML_CLIENT_SECRET ?? '',
-    mlBaseUrl: process.env.ML_BASE_URL ?? 'https://api.mercadolibre.com',
-    decodoApiToken: process.env.DECODO_API_TOKEN ?? '',
-    decodoRateLimitPerSec: parseInt(process.env.DECODO_RATE_LIMIT_PER_SEC ?? '10', 10),
-    scraperMaxConcurrent: Math.max(1, parseInt(process.env.SCRAPER_MAX_CONCURRENT ?? '10', 10)),
-    scraperFailureThreshold: Math.max(1, parseInt(process.env.SCRAPER_FAILURE_THRESHOLD ?? '10', 10)),
-    scraperFailureDumpDir: process.env.SCRAPER_FAILURE_DUMP_DIR ?? 'tmp/scraper-failures',
-    snapshotSiteIds: parseSiteIds(process.env.SNAPSHOT_SITE_IDS),
-    snapshotCategoryLimit: parseCategoryLimit(process.env.SNAPSHOT_CATEGORY_LIMIT),
-    snapshotCategoriesBySite: parseCategoriesBySite(),
-    syncDayOfWeek: process.env.SYNC_DAY_OF_WEEK ?? 'mon',
-    syncHour: parseInt(process.env.SYNC_HOUR ?? '3', 10),
-  }),
+  (): AppConfig => {
+    const appMode = parseAppMode(process.env.APP_MODE);
+
+    // APP_MODE is the single source of truth for which sites/categories to scrape.
+    // DEVELOPMENT intentionally ignores SNAPSHOT_SITE_IDS / SNAPSHOT_CATEGORIES_* to
+    // prevent accidental production spend when the env vars are mis-set.
+    const snapshotSiteIds =
+      appMode === 'PRODUCTION' ? PROD_CORE_SITES : [DEV_SAMPLE_SITE];
+
+    const snapshotCategoriesBySite: Record<string, string[]> =
+      appMode === 'PRODUCTION'
+        ? {}
+        : { [DEV_SAMPLE_SITE]: [DEV_SAMPLE_CATEGORY] };
+
+    return {
+      appMode,
+      databaseUrl:
+        process.env.DATABASE_URL ??
+        'postgresql://postgres:postgres@localhost:5432/market_analysis',
+      mlClientId: process.env.ML_CLIENT_ID ?? '',
+      mlClientSecret: process.env.ML_CLIENT_SECRET ?? '',
+      mlBaseUrl: process.env.ML_BASE_URL ?? 'https://api.mercadolibre.com',
+      decodoApiToken: process.env.DECODO_API_TOKEN ?? '',
+      decodoRateLimitPerSec: parseInt(process.env.DECODO_RATE_LIMIT_PER_SEC ?? '10', 10),
+      scraperMaxConcurrent: Math.max(1, parseInt(process.env.SCRAPER_MAX_CONCURRENT ?? '10', 10)),
+      scraperFailureThreshold: Math.max(1, parseInt(process.env.SCRAPER_FAILURE_THRESHOLD ?? '10', 10)),
+      scraperFailureDumpDir: process.env.SCRAPER_FAILURE_DUMP_DIR ?? 'tmp/scraper-failures',
+      snapshotSiteIds,
+      snapshotCategoryLimit: parseCategoryLimit(process.env.SNAPSHOT_CATEGORY_LIMIT),
+      snapshotCategoriesBySite,
+      syncDayOfWeek: process.env.SYNC_DAY_OF_WEEK ?? 'mon',
+      syncHour: parseInt(process.env.SYNC_HOUR ?? '3', 10),
+    };
+  },
 );

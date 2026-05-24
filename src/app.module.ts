@@ -8,6 +8,11 @@ import { SyncModule } from './sync/sync.module';
 import { SchedulerModule } from './scheduler/scheduler.module';
 import { AppController } from './app.controller';
 
+// The internal NestJS cron (WeeklySyncJob) is opt-in. GitHub Actions and the
+// CLI keep it off to avoid double-scheduling against the external trigger.
+const internalSchedulerEnabled =
+  process.env.ENABLE_INTERNAL_SCHEDULER?.toLowerCase() === 'true';
+
 @Module({
   imports: [
     ConfigModule.forRoot({
@@ -19,7 +24,7 @@ import { AppController } from './app.controller';
     CategoriesModule,
     ProductsModule,
     SyncModule,
-    SchedulerModule,
+    ...(internalSchedulerEnabled ? [SchedulerModule] : []),
   ],
   controllers: [AppController],
 })

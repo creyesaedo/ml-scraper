@@ -30,9 +30,38 @@ npx prisma studio
 # Build for production
 npm run build
 
+# Run sync from the command line (used by GitHub Actions; uses APP_MODE)
+npm run sync:run            # iterates over sites derived from APP_MODE
+npm run sync:run MLC        # overrides to a single siteId
+
 # Tests
 npm test
 ```
+
+## Execution modes
+
+The scraper can be triggered three different ways. All share the same code path (`SyncRunnerService.run`).
+
+| Mode | Trigger | Used for |
+|---|---|---|
+| **GitHub Actions** (default today) | `.github/workflows/ml-sync.yml` — `schedule:` weekly cron + `workflow_dispatch` | Production. Schedule = Monday 03:00 UTC. |
+| **CLI** | `npm run sync:run [siteId]` | Local testing, ad-hoc runs, self-hosted cron-from-OS. |
+| **HTTP API** | `POST /sync/run/:siteId` against a running NestJS server | Self-hosted deploy via Docker, called by an external orchestrator. |
+
+The in-process NestJS scheduler (`WeeklySyncJob`) is **off by default** and only registers if `ENABLE_INTERNAL_SCHEDULER=true`. This avoids double-scheduling when GitHub Actions is the source of timing.
+
+## APP_MODE
+
+A single env var controls which sites and categories the sync targets:
+
+| `APP_MODE` | Sites scraped | Categories per site | Decodo cost / run |
+|---|---|---|---|
+| `DEVELOPMENT` (default) | `MLC` only | `MLC1648` only (Electrónica Chile) | ~$0.03 (21 requests) |
+| `PRODUCTION` | Core 8: `MLA,MLB,MLC,MLM,MCO,MPE,MLU,MLV` | All parent categories per site | ~$8 (5,270 requests) |
+
+Any other value (including blank) falls back to `DEVELOPMENT` for safety — prevents accidental production spend when the var is mis-typed.
+
+**Important**: in `DEVELOPMENT` mode, the env vars `SNAPSHOT_SITE_IDS` and `SNAPSHOT_CATEGORIES_*` are **ignored**. This is intentional — `APP_MODE` is the single source of truth for what gets scraped. If you need a custom scope, edit `src/config/app.config.ts`.
 
 ## Docker setup
 
@@ -403,7 +432,9 @@ Defined in `src/config/app.config.ts`, read from `.env`:
 
 | Variable | Default | Description |
 |---|---|---|
-| `DATABASE_URL` | postgres local | Must use `postgresql://` |
+| `APP_MODE` | `DEVELOPMENT` | `DEVELOPMENT` → MLC + MLC1648 only. `PRODUCTION` → 8 core sites, all parent categories. Any other value falls back to `DEVELOPMENT`. Overrides `SNAPSHOT_SITE_IDS` / `SNAPSHOT_CATEGORIES_*`. |
+| `DATABASE_URL` | postgres local | Runtime connection. In production points to Neon's **pooled** URL (`...-pooler.neon.tech`). |
+| `DIRECT_URL` | unset | Direct (non-pooled) connection used by `prisma db push` / `migrate`. Required when `DATABASE_URL` points to pgBouncer (Neon pooler). Falls back to `DATABASE_URL` when unset. |
 | `ML_CLIENT_ID` | `""` | MercadoLibre OAuth2 client ID |
 | `ML_CLIENT_SECRET` | `""` | MercadoLibre OAuth2 client secret |
 | `ML_BASE_URL` | `https://api.mercadolibre.com` | ML API base URL |
@@ -412,11 +443,12 @@ Defined in `src/config/app.config.ts`, read from `.env`:
 | `SCRAPER_MAX_CONCURRENT` | `10` | Hard cap on parallel scraper requests. Prevents the outer p-limits (3×8=24) from blowing past Decodo's plan rate. |
 | `SCRAPER_FAILURE_THRESHOLD` | `10` | Consecutive hard failures before the circuit breaker trips, aborts the sync, and dumps diagnostics. |
 | `SCRAPER_FAILURE_DUMP_DIR` | `tmp/scraper-failures` | Directory (relative to cwd) where the breaker writes `error.log`, `sample.html`, `context.json` on trip. |
-| `SNAPSHOT_SITE_IDS` | `MLA` | Comma-separated MercadoLibre sites to snapshot weekly (`MLC,MLA,...`). Does not affect category sync (always runs for all sites). |
-| `SNAPSHOT_CATEGORY_LIMIT` | unset | **Dev only.** Scrape only the first N parent categories per site (by `id` ASC). Unset/0 → all categories. |
-| `SNAPSHOT_CATEGORIES_<SITE>` | unset | **Dev only.** Comma-separated whitelist of parent `ml_id`s for that site (e.g. `SNAPSHOT_CATEGORIES_MLC=MLC1574,MLC1648`). Takes precedence over `SNAPSHOT_CATEGORY_LIMIT`. |
-| `SYNC_DAY_OF_WEEK` | `mon` | Day for weekly cron (mon–sun) |
-| `SYNC_HOUR` | `3` | UTC hour for weekly cron |
+| `ENABLE_INTERNAL_SCHEDULER` | `false` | Opt-in for the in-process NestJS cron (`WeeklySyncJob`). Off by default to avoid double-scheduling when GitHub Actions or another external trigger is used. |
+| `SNAPSHOT_SITE_IDS` | (ignored) | **Ignored when `APP_MODE` is set.** Kept for backwards compat with manual overrides if you bypass the mode-derived defaults. |
+| `SNAPSHOT_CATEGORY_LIMIT` | unset | Cap on parent categories per site (by `id` ASC). Applies in PRODUCTION mode if you want a partial run. |
+| `SNAPSHOT_CATEGORIES_<SITE>` | (ignored) | **Ignored when `APP_MODE` is set.** Replaced by the mode-derived whitelist. |
+| `SYNC_DAY_OF_WEEK` | `mon` | Day for in-process cron (only used if `ENABLE_INTERNAL_SCHEDULER=true`). |
+| `SYNC_HOUR` | `3` | UTC hour for in-process cron (same condition as above). GitHub Actions cron is set in `.github/workflows/ml-sync.yml`. |
 
 ## Adding a new model
 

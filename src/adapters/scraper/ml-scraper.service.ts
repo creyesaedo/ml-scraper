@@ -224,6 +224,7 @@ export class MlScraperService {
   ): Promise<DecodoScrapeResult> {
     await this.rateLimiter.acquire();
 
+    const targetUrl = String(body.url ?? '<unknown>');
     let res: Response;
     try {
       res = await fetch(DECODO_ENDPOINT, {
@@ -235,12 +236,31 @@ export class MlScraperService {
         },
         body: JSON.stringify(body),
       });
+      if (retried) {
+        this.logger.log(`Decodo retry succeeded for ${targetUrl}`);
+      }
     } catch (err) {
+      const msg = (err as Error).message;
+      const cause = (err as Error & { cause?: { code?: string } }).cause?.code;
+      const causeStr = cause ? ` (cause: ${cause})` : '';
+      // Transient network error (DNS hiccup, TCP reset, TLS handshake glitch).
+      // The request never reached Decodo, so a retry is free. Single retry —
+      // a second failure indicates a real outage and gets fed to the breaker.
+      if (!retried) {
+        this.logger.warn(
+          `Decodo fetch failed for ${targetUrl}${causeStr}: ${msg} — retrying in 1s`,
+        );
+        await sleep(1000);
+        return this.postScrapeInner(body, true);
+      }
+      this.logger.error(
+        `Decodo fetch failed for ${targetUrl}${causeStr}: ${msg} — giving up after retry`,
+      );
       return {
         content: '',
         targetStatus: null,
         decodoStatus: 0,
-        error: `network: ${(err as Error).message}`,
+        error: `network: ${msg}${causeStr}`,
       };
     }
 

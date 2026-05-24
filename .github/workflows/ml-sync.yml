@@ -1,0 +1,69 @@
+name: ML Sync
+
+on:
+  schedule:
+    # Weekly: Monday 03:00 UTC. Matches the historical default of SYNC_DAY_OF_WEEK / SYNC_HOUR.
+    # GitHub disables scheduled workflows after 60 days of repo inactivity — any commit reactivates them.
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+    inputs:
+      app_mode:
+        description: 'Override APP_MODE for this run (leave blank to use repo var)'
+        required: false
+        type: choice
+        options:
+          - ''
+          - DEVELOPMENT
+          - PRODUCTION
+        default: ''
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    # ~100 min for PRODUCTION (Core 8). Leaves headroom below GitHub's 360-min job limit.
+    timeout-minutes: 350
+    env:
+      # Precedence: workflow_dispatch input → repo variable.
+      APP_MODE: ${{ inputs.app_mode || vars.APP_MODE }}
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      DIRECT_URL: ${{ secrets.DIRECT_URL }}
+      DECODO_API_TOKEN: ${{ secrets.DECODO_API_TOKEN }}
+      ML_CLIENT_ID: ${{ secrets.ML_CLIENT_ID }}
+      ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
+      DECODO_RATE_LIMIT_PER_SEC: '10'
+      SCRAPER_MAX_CONCURRENT: '10'
+      SCRAPER_FAILURE_DUMP_DIR: 'tmp/scraper-failures'
+      # Explicit: the in-process NestJS cron stays off — GitHub `schedule:` is the only trigger.
+      ENABLE_INTERNAL_SCHEDULER: 'false'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: Apply schema to Neon
+        # Idempotent. Uses DIRECT_URL (via prisma.config.ts) — pgBouncer would reject DDL.
+        run: npx prisma db push --accept-data-loss=false
+
+      - name: Build
+        run: npm run build
+
+      - name: Run sync
+        run: npm run sync:run
+
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scraper-failures-${{ github.run_id }}
+          path: tmp/scraper-failures/
+          if-no-files-found: ignore
+          retention-days: 14
