@@ -71,18 +71,25 @@ async function main(): Promise<void> {
   }
 
   let exitCode = 0;
-  for (const siteId of siteIds) {
+  for (let i = 0; i < siteIds.length; i++) {
+    const siteId = siteIds[i];
+    logger.log(`[${siteId}] (${i + 1}/${siteIds.length}) starting`);
+    const start = Date.now();
     try {
       const result = (await runner.run(siteId)) as {
-        productos?: { aborted?: unknown };
+        productos?: { aborted?: unknown; productos_guardados?: number };
       };
-      logger.log(`[${siteId}] done: ${JSON.stringify(result)}`);
+      const elapsed = ((Date.now() - start) / 1000).toFixed(1);
+      const saved = result.productos?.productos_guardados ?? 0;
+      logger.log(`[${siteId}] done in ${elapsed}s — ${saved} products saved`);
+      logger.log(`[${siteId}] result: ${JSON.stringify(result)}`);
       if (result.productos?.aborted) {
         logger.error(`[${siteId}] circuit breaker tripped — see diagnostics dir`);
         exitCode = 1;
       }
     } catch (err) {
-      logger.error(`[${siteId}] failed`, err as Error);
+      const elapsed = ((Date.now() - start) / 1000).toFixed(1);
+      logger.error(`[${siteId}] failed after ${elapsed}s`, err as Error);
       exitCode = 1;
     }
   }

@@ -220,6 +220,7 @@ export class ProductCollectionService {
           await this.markCategoryInProgress(syncRunId, rootCat.ml_id);
 
           try {
+            this.logger.log(`[${siteId}] Starting category ${rootCat.ml_id}`);
             const { products: scraped, enrichmentsByUrl } =
               await this.scraper.scrapeCategoryWithProducts(siteId, rootCat.ml_id, 8);
 
@@ -230,6 +231,10 @@ export class ProductCollectionService {
               return;
             }
 
+            this.logger.log(
+              `[${siteId}] ${rootCat.ml_id}: enriching ${scraped.length} products via ML API + resolving leaf categories`,
+            );
+            const enrichStart = Date.now();
             const enriched = await Promise.all(
               scraped.map((p) =>
                 productLimit(async () => {
@@ -279,6 +284,9 @@ export class ProductCollectionService {
               ),
             );
 
+            this.logger.log(
+              `[${siteId}] ${rootCat.ml_id}: enrichment finished in ${((Date.now() - enrichStart) / 1000).toFixed(1)}s — inserting ${enriched.length} rows`,
+            );
             await this.prisma.product.createMany({
               data: enriched.map((p) => ({
                 name: p.name,

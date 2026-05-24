@@ -19,6 +19,17 @@ import { SCRAPER_SEMAPHORE, ScraperSlot } from './scraper-semaphore.provider';
 
 const DECODO_ENDPOINT = 'https://scraper-api.decodo.com/v2/scrape';
 
+const PROGRESS_BAR_WIDTH = 24;
+
+function progressBar(completed: number, total: number): string {
+  if (total <= 0) return '[' + ' '.repeat(PROGRESS_BAR_WIDTH) + ']';
+  const filled = Math.min(
+    PROGRESS_BAR_WIDTH,
+    Math.round((completed / total) * PROGRESS_BAR_WIDTH),
+  );
+  return `[${'='.repeat(filled)}${' '.repeat(PROGRESS_BAR_WIDTH - filled)}]`;
+}
+
 // HTML size below which a response is treated as a partial/challenge page.
 // Real ML pages are 400 KB+; head-only responses (the Decodo SSR streaming bug)
 // land around 5–11 KB.
@@ -106,16 +117,32 @@ export class MlScraperService {
       this.logger.warn(`[${siteId}] No products found for ${categoryMlId}`);
       return { products, enrichmentsByUrl };
     }
-    this.logger.log(`[${siteId}] ${categoryMlId} → ${products.length} products`);
-
     // Step 2: product pages in parallel (still bounded by rate limiter)
+    const total = products.length;
+    const productPagesStart = Date.now();
     const limit = pLimit(productConcurrency);
+    let completed = 0;
+    // Emit ~5 progress updates per category regardless of size (1 update for
+    // small categories, every Nth for large ones). Final update always logs
+    // with elapsed time.
+    const step = Math.max(1, Math.floor(total / 5));
     await Promise.all(
       products.map((p) =>
         limit(async () => {
           if (!p.product_url) return;
           const enrichment = await this.scrapeProductPage(p.product_url, siteId);
           enrichmentsByUrl.set(p.product_url, enrichment);
+          completed += 1;
+          const isFinal = completed === total;
+          if (completed % step === 0 || isFinal) {
+            const bar = progressBar(completed, total);
+            const suffix = isFinal
+              ? ` (${((Date.now() - productPagesStart) / 1000).toFixed(1)}s)`
+              : '';
+            this.logger.log(
+              `[${siteId}] Scraping ${total} products for ${categoryMlId} ${bar} ${completed}/${total}${suffix}`,
+            );
+          }
         }),
       ),
     );
