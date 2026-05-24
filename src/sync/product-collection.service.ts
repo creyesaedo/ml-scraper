@@ -162,6 +162,19 @@ export class ProductCollectionService {
     const whitelist = whitelistBySite[siteId.toUpperCase()];
     const categoryLimitN = this.configService.get<number | null>('app.snapshotCategoryLimit');
 
+    // Safety net: in DEVELOPMENT mode the whitelist MUST be populated. If we
+    // reach this point with an empty whitelist, something upstream (CLI override,
+    // config wiring) failed and processing all parent categories would cost
+    // ~$1 per site instead of ~$0.03. Abort loudly to keep dev runs cheap.
+    const appMode = this.configService.get<string>('app.appMode');
+    if (appMode === 'DEVELOPMENT' && !whitelist?.length) {
+      throw new Error(
+        `[${siteId}] DEVELOPMENT mode requires a whitelist but none is set. ` +
+          `Aborting before any Decodo spend. Verify the CLI overrode ` +
+          `app.snapshotCategoriesBySite before invoking collect().`,
+      );
+    }
+
     if (whitelist?.length) {
       const set = new Set(whitelist);
       const before = rootCategories.length;

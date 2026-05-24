@@ -2,11 +2,64 @@ import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from '../app.module';
-import type { AppMode } from '../config/app.config';
+import type { AppConfig, AppMode } from '../config/app.config';
 import { PrismaService } from '../prisma/prisma.service';
+import { CategorySyncService } from '../sync/category-sync.service';
 import { SyncRunnerService } from '../sync/sync-runner.service';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// In DEVELOPMENT mode, after the random site is picked at config load, pick a
+// random parent category for that site from the DB and inject it as the
+// whitelist. Categories must already be synced; if not, we trigger the sync
+// here so the random pick has something to choose from.
+async function pickRandomDevelopmentCategory(
+  app: Awaited<ReturnType<typeof NestFactory.createApplicationContext>>,
+  siteId: string,
+  logger: Logger,
+): Promise<void> {
+  const prisma = app.get(PrismaService);
+  const config = app.get(ConfigService);
+
+  let count = await prisma.category.count({
+    where: { country: siteId, parent_id: null },
+  });
+
+  if (count === 0) {
+    logger.log(`No categories cached for ${siteId} — running category sync first`);
+    const categorySync = app.get(CategorySyncService);
+    await categorySync.sync();
+    count = await prisma.category.count({
+      where: { country: siteId, parent_id: null },
+    });
+  }
+
+  if (count === 0) {
+    throw new Error(`No parent categories found for ${siteId} after sync`);
+  }
+
+  const skip = Math.floor(Math.random() * count);
+  const cat = await prisma.category.findFirst({
+    where: { country: siteId, parent_id: null },
+    orderBy: { id: 'asc' },
+    skip,
+  });
+
+  if (!cat) {
+    throw new Error(`Failed to fetch random category for ${siteId} (skip=${skip}, count=${count})`);
+  }
+
+  logger.log(
+    `DEVELOPMENT pick: ${siteId} / ${cat.ml_id} "${cat.name}" (${count} parent categories available)`,
+  );
+  // ConfigService.set() does NOT propagate into registerAs() namespaces — they
+  // hold their own object reference. Mutate the registered object directly so
+  // ProductCollectionService picks up the override when it reads the whitelist.
+  const appConfigRef = config.get<AppConfig>('app');
+  if (appConfigRef) {
+    appConfigRef.snapshotCategoriesBySite = { [siteId]: [cat.ml_id] };
+  }
+}
 
 // Neon's free tier suspends compute after ~5 min of inactivity. The first
 // query against a suspended instance can take 5-15s to wake it up and the
@@ -51,8 +104,6 @@ async function main(): Promise<void> {
 
   const appMode = config.get<AppMode>('app.appMode') ?? 'DEVELOPMENT';
   const configuredSites = config.get<string[]>('app.snapshotSiteIds') ?? [];
-  const categoriesBySite =
-    config.get<Record<string, string[]>>('app.snapshotCategoriesBySite') ?? {};
 
   const argSite = process.argv[2]?.toUpperCase();
   const siteIds = argSite ? [argSite] : configuredSites;
@@ -64,8 +115,14 @@ async function main(): Promise<void> {
   }
 
   if (appMode === 'DEVELOPMENT') {
-    const sampleCat = categoriesBySite[siteIds[0]]?.[0] ?? '(no whitelist)';
-    logger.log(`APP_MODE=DEVELOPMENT — scraping ${siteIds[0]} / ${sampleCat} only`);
+    logger.log(`APP_MODE=DEVELOPMENT — randomized site: ${siteIds[0]}`);
+    try {
+      await pickRandomDevelopmentCategory(app, siteIds[0], logger);
+    } catch (err) {
+      logger.error(`Failed to pick random DEVELOPMENT category: ${(err as Error).message}`);
+      await app.close();
+      process.exit(1);
+    }
   } else {
     logger.log(`APP_MODE=PRODUCTION — scraping ${siteIds.length} sites: ${siteIds.join(', ')}`);
   }

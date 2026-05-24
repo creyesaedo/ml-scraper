@@ -21,11 +21,13 @@ export interface AppConfig {
 }
 
 const PROD_CORE_SITES = ['MLA', 'MLB', 'MLC', 'MLM', 'MCO', 'MPE', 'MLU', 'MLV'];
-const DEV_SAMPLE_SITE = 'MLC';
-const DEV_SAMPLE_CATEGORY = 'MLC1648';
 
 function parseAppMode(raw: string | undefined): AppMode {
   return raw?.toUpperCase() === 'PRODUCTION' ? 'PRODUCTION' : 'DEVELOPMENT';
+}
+
+function pickRandomDevelopmentSite(): string {
+  return PROD_CORE_SITES[Math.floor(Math.random() * PROD_CORE_SITES.length)];
 }
 
 function parseCategoryLimit(raw: string | undefined): number | null {
@@ -42,13 +44,15 @@ export default registerAs(
     // APP_MODE is the single source of truth for which sites/categories to scrape.
     // DEVELOPMENT intentionally ignores SNAPSHOT_SITE_IDS / SNAPSHOT_CATEGORIES_* to
     // prevent accidental production spend when the env vars are mis-set.
+    // In DEVELOPMENT we pick a random site from the 8 core. The specific parent
+    // category is picked at runtime from the DB by the CLI (see run-sync.ts),
+    // since it needs a live query against the categories table.
     const snapshotSiteIds =
-      appMode === 'PRODUCTION' ? PROD_CORE_SITES : [DEV_SAMPLE_SITE];
+      appMode === 'PRODUCTION' ? PROD_CORE_SITES : [pickRandomDevelopmentSite()];
 
-    const snapshotCategoriesBySite: Record<string, string[]> =
-      appMode === 'PRODUCTION'
-        ? {}
-        : { [DEV_SAMPLE_SITE]: [DEV_SAMPLE_CATEGORY] };
+    // Empty in both modes — PRODUCTION wants all parent categories, DEVELOPMENT
+    // gets its random pick injected by the CLI before collect() runs.
+    const snapshotCategoriesBySite: Record<string, string[]> = {};
 
     return {
       appMode,
