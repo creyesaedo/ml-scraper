@@ -3,7 +3,7 @@
 **TL;DR**: Con nuestras credenciales `client_credentials` actuales, **NO**.
 ML bloquea el endpoint `/items/{id}` para apps de terceros — solo el seller
 dueño del item puede leerlo. La única vía viable para enriquecer datos de
-listing es scrapear el HTML de la página del listing (vía Bright Data, igual
+listing es scrapear el HTML de la página del listing (vía el scraper, igual
 que hacemos hoy para el catálogo).
 
 ---
@@ -123,10 +123,9 @@ De la página HTML se podrían extraer:
 - Atributos / variantes
 - Imágenes
 
-**Costo**: 1 navegación Bright Data extra por producto = +20 navegaciones por
-categoría. Hoy hacemos 21 navegaciones/categoría (1 categoría + 20 productos);
-pasaríamos a 41/categoría, casi 2× el costo de bandwidth (~$50/sync en vez de
-~$26).
+**Costo**: 1 request extra por producto = +20 requests por categoría. Hoy
+hacemos 21 requests/categoría (1 categoría + 20 productos); pasaríamos a
+41/categoría, casi 2× el costo del scraper.
 
 **Alternativa más barata**: scrapear el listing solo para los productos
 **sin `catalog_id`** (los `/up/` URLs que hoy quedan vacíos de enriquecimiento).

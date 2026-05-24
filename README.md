@@ -1,6 +1,6 @@
 # ML-Scraper
 
-Weekly snapshots of MercadoLibre's top-selling products per category, persisted to PostgreSQL for trend analysis. Built with NestJS + Prisma + Playwright, using Bright Data's Scraping Browser to bypass MercadoLibre's JavaScript proof-of-work challenge.
+Weekly snapshots of MercadoLibre's top-selling products per category, persisted to PostgreSQL for trend analysis. Built with NestJS + Prisma 7 + Decodo's Web Scraping API to bypass MercadoLibre's JavaScript proof-of-work challenge.
 
 ## What it does
 
@@ -19,34 +19,30 @@ A weekly cron triggers the full sync; HTTP endpoints expose the persisted data f
 |---|---|
 | Runtime | Node.js 20+ |
 | Framework | NestJS 10 |
-| ORM | Prisma 5 + PostgreSQL 16 |
-| HTTP client | axios |
+| ORM | Prisma 7 (driver adapter: `@prisma/adapter-pg`) + PostgreSQL 16 |
+| HTTP client | axios + native `fetch` |
 | HTML parsing | cheerio + regex |
-| Browser automation | Playwright (CDP) |
-| Scraping proxy | Bright Data Scraping Browser |
+| Scraper | Decodo Web Scraping API (`/v2/scrape`, premium pool, headless HTML) |
 | Scheduler | `@nestjs/schedule` (cron) |
-| Concurrency | `p-limit` |
+| Concurrency | `p-limit` + sliding-window rate limiter + global semaphore |
 
 ## Prerequisites
 
 - Node.js 20 or higher
 - PostgreSQL 16 (or run via the included `docker-compose.yml`)
-- A [Bright Data](https://brightdata.com/) account with a **Scraping Browser** zone — needed to render MercadoLibre pages that enforce a JS proof-of-work challenge. Free tier suffices for testing.
+- A [Decodo](https://decodo.com/) account with a Web Scraping API token — needed to render MercadoLibre pages that enforce a JS proof-of-work challenge. The Free/$19 tier suffices for one site (~$4–$8/mo per site at weekly cadence).
 - (Optional) A MercadoLibre developer app with `client_credentials` OAuth2 access — needed to call `/products/{id}` and `/categories/{id}`. Without it, only the scraped fields are populated.
 
 ## Setup
 
 ```bash
-# Clone and install
 git clone <repo-url>
 cd b2b-market-analysis
 npm install
 
-# Copy and fill the env file
 cp .env.example .env
-# Edit .env: at minimum set DATABASE_URL and BRIGHTDATA_SCRAPING_BROWSER_WS
+# Edit .env: at minimum set DATABASE_URL and DECODO_API_TOKEN
 
-# Generate Prisma client + apply schema
 npx prisma generate
 npx prisma db push
 ```
@@ -73,8 +69,11 @@ npm run start:dev
 
 | Variable | Default | Required | Description |
 |---|---|---|---|
-| `DATABASE_URL` | `postgresql://postgres:postgres@localhost:5432/market_analysis` | yes | PostgreSQL connection string (`postgresql://` only) |
-| `BRIGHTDATA_SCRAPING_BROWSER_WS` | `""` | yes | Bright Data Scraping Browser WSS endpoint (CDP) |
+| `DATABASE_URL` | `postgresql://postgres:postgres@localhost:5432/market_analysis` | yes | PostgreSQL connection string |
+| `DECODO_API_TOKEN` | `""` | yes | Decodo Web Scraping API token (base64) |
+| `DECODO_RATE_LIMIT_PER_SEC` | `10` | no | Plan req/s cap (Free/$19=10, $49=25, …) |
+| `SCRAPER_MAX_CONCURRENT` | `10` | no | Hard cap on parallel scraper requests |
+| `SCRAPER_FAILURE_THRESHOLD` | `10` | no | Consecutive hard failures before the circuit breaker trips |
 | `ML_CLIENT_ID` | `""` | no | MercadoLibre OAuth2 client ID |
 | `ML_CLIENT_SECRET` | `""` | no | MercadoLibre OAuth2 client secret |
 | `ML_BASE_URL` | `https://api.mercadolibre.com` | no | ML API base URL |
@@ -88,11 +87,12 @@ npm run start:dev
 
 ```http
 POST /sync/run/:siteId         # Full cycle: categories (if empty) + products
-POST /sync/categorias          # Categories only — body: { siteId }
+POST /sync/categorias          # Categories only — syncs all ML sites
 POST /sync/productos/:siteId   # Products only (categories must already exist)
+POST /sync/resume/:siteId      # Resume the most recent aborted sync_run
 ```
 
-A full sync of 484 parent categories takes ~2–3 hours. Trigger via cron in production, not via HTTP request.
+A full sync of 32 parent categories takes ~13 minutes per site. Trigger via cron in production, not via HTTP request.
 
 ### Read
 
@@ -108,37 +108,46 @@ GET /productos?category_id=<id>      # Latest product snapshots for a category
 src/
 ├── adapters/
 │   ├── mercadolibre/      # OAuth2 + API client (axios)
-│   └── scraper/           # Playwright + Bright Data Scraping Browser
+│   └── scraper/           # Decodo Web Scraping API
 ├── categories/            # Read endpoints + category sync
 ├── products/              # Read endpoints
 ├── sync/                  # Orchestration (SyncRunnerService, ProductCollectionService)
 ├── scheduler/             # Weekly cron job
-├── prisma/                # Prisma service (DI wrapper)
+├── prisma/                # Prisma service (DI wrapper, driver adapter)
 └── config/                # env-based config registered with @nestjs/config
 prisma/
-└── schema.prisma          # Two tables: categories, products
+└── schema.prisma          # categories, products, sync_progress, sellers
+prisma.config.ts           # Prisma 7 datasource URL config
 ```
 
 ## Data model
 
-Two tables, all column names in English.
+All column names in English.
 
 - **`categories`** — two-level tree. Root categories have `parent_id = null`. Leaf categories (created on demand during product scraping) have `parent_id` pointing to a root. `ml_id` is the MercadoLibre category ID (unique, indexed).
 - **`products`** — immutable snapshots. `snapshot_date` enables price/ranking history. When the leaf category is known, `category_id` = leaf and `parent_id` = root; otherwise `category_id` = root and `parent_id` = null. Enrichment fields are nullable for products without a catalog page.
+- **`sync_progress`** — per-category state for resumable syncs. See [DATABASE.md](./DATABASE.md).
+- **`sellers`** — deduped seller profiles extracted from product pages.
 
-## How the scraper minimizes Bright Data bandwidth
+## How the scraper bypasses MercadoLibre's anti-bot
 
-Bright Data Scraping Browser bills per GB of proxy traffic. The scraper applies two optimizations:
+MercadoLibre serves a JavaScript proof-of-work challenge to most non-browser HTTP requests. Decodo's `/v2/scrape` endpoint with `proxy_pool: premium` + `headless: html` is the only configuration that consistently passes; both the standard proxy pool and plain HTTP requests return either the challenge page or `status_code: 613` ("failed to scrape").
 
-1. **One CDP session per category, not per page.** `scrapeCategoryWithProducts` opens one browser context and reuses it for all 21 navigations (1 category page + 20 product pages). The browser's JS bundle cache stays warm — bundles are downloaded once, not 20 times.
+To work around Decodo's headless cutting off mid-render on ML's streaming SSR pages, every request chains `wait: 4s` → `scroll_to_bottom: 3s` → `wait_for_element` (price selector for product pages, search-result selector for category pages). Without this chain, ~5–10 % of responses come back as head-only HTML (5–11 KB instead of the real 400 KB+).
 
-2. **Two-level resource blocking via `page.route()`:**
-   - Context level: blocks images, fonts, media, and tracking domains (`google-analytics`, `googletagmanager`, `snoopy.mercadolibre.com`, etc.).
-   - Page level: for **product pages**, aborts every request whose `resourceType()` is not `document`. Product data is server-rendered into inline `<script>` tags, so regex extraction on the raw HTML works without any JS execution.
+A sliding-window rate limiter caps starts at `DECODO_RATE_LIMIT_PER_SEC`; HTTP 429 responses get a single 1 s backoff retry (not billed). A separate global semaphore (`SCRAPER_MAX_CONCURRENT`) caps total in-flight requests across the whole process so the outer `p-limit(3 categories × 8 products)` cannot blow past the plan rate.
 
-Measured cost: ~6.7 MB per category × 484 categories = ~3.2 GB per sync → ~$26 at $8/GB (vs. ~$300 with naive one-session-per-product).
+**Three realistic scopes** (ML has 19 sites with 484 parent categories total):
 
-See [CLAUDE.md](./CLAUDE.md) for the full architecture, error handling details, and known limitations.
+| Scope | Sites | Decodo $19/mo | Decodo $249/mo |
+|---|---|---:|---:|
+| Single site (e.g. MLC) | 1 | ~$4.37 | ~$3.35 |
+| **Core 8 LatAm** (default) | MLA MLB MLC MLM MCO MPE MLU MLV | **~$34** | ~$26 |
+| All 19 sites | every ML site | ~$66 | ~$51 |
+
+Small markets (Bolivia, Cuba, Costa Rica, Ecuador, Guatemala, Honduras, Nicaragua, Panama, Paraguay, Dominican Rep, El Salvador) are excluded from the default — low e-commerce volume, rarely worth the cost for market analysis.
+
+See [CLAUDE.md](./CLAUDE.md) for the full architecture, circuit-breaker behavior, and known limitations.
 
 ## Useful commands
 
@@ -157,7 +166,7 @@ npx prisma studio         # GUI to browse/edit the DB
 - **Products from `/up/` URLs** (non-catalog listings) have `catalog_id = null` and may have partial enrichment.
 - **Categories without a `/mas-vendidos/{id}` page** return 0 products and are reported in the `errores` array. This is expected — not all parent categories have a top-sellers page.
 - **`sold_count` is not available through the MercadoLibre API.** The "+X mil vendidos" badge is rendered only in the product page HTML, so it must be scraped.
-- **`context.request.get()` cannot bypass the challenge.** Even with all bypass cookies set, MercadoLibre's anti-bot serves the challenge page to raw HTTP requests. Only real browser navigations (`page.goto`) work, because Bright Data's challenge solver only runs in that path.
+- **ML Search API is blocked** for `client_credentials` tokens — scraping is the only viable approach.
 
 ## License
 

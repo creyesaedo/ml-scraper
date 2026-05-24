@@ -1,6 +1,6 @@
 # Database Reference
 
-Schema definido en [prisma/schema.prisma](prisma/schema.prisma). Tres tablas: `categories`, `products`, `sellers`.
+Schema definido en [prisma/schema.prisma](prisma/schema.prisma). Cuatro tablas: `categories`, `products`, `sellers`, `sync_progress`.
 
 ---
 
@@ -94,12 +94,29 @@ Categorías de MercadoLibre. Las raíces vienen del endpoint oficial `/sites/{si
 | `review_count` | `int` | SÍ | Número de reviews del catálogo | `342` |
 | `brand` | `varchar(255)` | SÍ | Marca declarada en los atributos del producto | `"Apple"`, `"Tasbel"` |
 
+### Campos de market analysis (extraídos del HTML de la página de más vendidos / PDP)
+
+| Columna | Tipo | Nullable | Descripción | Ejemplo |
+|---|---|---|---|---|
+| `ranking_position` | `int` | SÍ | Posición del producto en la página de **más vendidos** de su categoría raíz al momento del snapshot. 1 = primero. Permite tracking de subidas/bajadas semana a semana | `1`, `17` |
+| `original_price` | `decimal(14, 2)` | SÍ | Precio **antes** del descuento (`previous_price.value` en el buy-box del PDP). NULL cuando el producto no tiene descuento activo | `32990.00` |
+| `discount_pct` | `int` | SÍ | Porcentaje de descuento visible en el buy-box. NULL cuando no hay descuento. Rango válido: 1–100 | `34` |
+| `shipping_type` | `varchar(20)` | SÍ | Tipo de logística del listing ganador del buy-box. Valores: `"full"` (almacén ML), `"cross_border"` (importado, internacional), `"free"` (envío gratis sin FULL), `"standard"` (con costo). NULL si no se pudo detectar | `"full"` |
+| `listing_type_id` | `varchar(20)` | SÍ | Tier de publicación que el vendedor contrató con ML. Valores típicos: `"gold_pro"` (Premium, máx exposición + cuotas sin interés), `"gold_special"` (Clásica), `"gold"`, `"free"`. Proxy de inversión publicitaria del vendedor | `"gold_pro"` |
+| `is_cbt` | `boolean` | NO (default `false`) | `true` si el listing ganador es **cross-border / internacional** (producto importado vía CBT). Detectado por la presencia del bloque `cbt_summary` o el icono `cbt_fsbar_airplane` en el HTML | `true` |
+
 **Índices:**
 - `category_id`, `parent_id` — joins con categories.
 - `snapshot_date` — filtrar por fecha del snapshot.
 - `(country, snapshot_date)` — "top de país X en fecha Y" (compuesto, muy usado).
 - `(catalog_id, snapshot_date)` — "historia del producto X" (series de tiempo).
 - `seller_id` — productos de un vendedor.
+
+**Notas sobre los campos de market analysis:**
+- `ranking_position` se setea desde el índice de aparición en la página `/mas-vendidos/{id}` de la **categoría raíz**. Cuando `category_id` apunta a una hoja, el ranking sigue siendo el de la raíz (es la única página que ML expone como ranking).
+- `original_price` y `discount_pct` vienen siempre juntos: si uno es NULL, el otro también lo es. Cuando `discount_pct = 0`, ML omite el bloque y ambos quedan NULL.
+- `shipping_type = "full"` implica que ML maneja el stock — fuerte señal de profesionalización del vendedor.
+- `is_cbt = true` y `shipping_type = "cross_border"` suelen coincidir, pero no son el mismo campo: `is_cbt` mira el origen del producto, `shipping_type` mira la logística. Pueden divergir en CBT con stock en bodega local.
 
 ---
 
@@ -187,6 +204,63 @@ SELECT nickname, country, power_seller_status, total_sales
 FROM sellers
 WHERE first_seen >= NOW() - INTERVAL '30 days'
 ORDER BY total_sales DESC NULLS LAST;
+```
+
+---
+
+## Tabla `sync_progress`
+
+Checkpoint **por categoría** de cada corrida del sync. Permite (a) saber en qué punto se cayó un sync, (b) retomar lo que faltaba sin re-scrapear lo que ya se hizo. La pobla y mantiene `ProductCollectionService`.
+
+| Columna | Tipo | Nullable | Descripción | Ejemplo |
+|---|---|---|---|---|
+| `id` | `int` (autoincrement) | NO | Clave primaria | `123` |
+| `sync_run_id` | `varchar(100)` | NO | ID estable de la corrida. Formato: `{siteId}-{ISO-timestamp con `:` y `.` reemplazados}` | `"MLC-2026-05-23T03-00-00-000Z"` |
+| `country` | `varchar(10)` | NO | Site al que pertenece esta categoría | `"MLC"` |
+| `category_ml_id` | `varchar(50)` | NO | ML ID de la categoría raíz que se está scrapeando | `"MLC1512"` |
+| `status` | `varchar(20)` | NO | `"pending"` \| `"in_progress"` \| `"done"` \| `"failed"` | `"done"` |
+| `error_msg` | `text` | SÍ | Mensaje de error truncado a 1000 chars cuando `status = "failed"` | `"Tripped after 10 consecutive failures..."` |
+| `started_at` | `timestamp` | SÍ | Cuándo arrancó esta categoría (NULL hasta que pasa a `in_progress`) | `2026-05-23 03:00:14` |
+| `completed_at` | `timestamp` | SÍ | Cuándo terminó (done o failed) | `2026-05-23 03:01:02` |
+| `created_at` | `timestamp` | NO (default `now()`) | Cuándo se creó el row (al abrir el sync_run) | `2026-05-23 03:00:00` |
+
+**Constraints e índices:**
+- `UNIQUE(sync_run_id, category_ml_id)` — un sync_run no puede tener dos filas para la misma categoría.
+- `INDEX(country, status)` — para queries "qué quedó pendiente en este país".
+- `INDEX(sync_run_id)` — para queries "todo el progreso de esta corrida".
+
+**Ciclo de vida:**
+1. `openSyncRun()` inserta una fila por categoría con `status = "pending"`.
+2. Al empezar cada categoría → `status = "in_progress"`, `started_at = now()`.
+3. Si termina bien → `status = "done"`, `completed_at = now()`.
+4. Si falla (excepción NO relacionada al circuit breaker) → `status = "failed"`, `error_msg`, `completed_at`. El sync continúa con las demás categorías.
+5. Si el **circuit breaker** dispara → la categoría in-flight se marca `failed`, las que aún estaban `pending` quedan así, y `collect()` retorna con `aborted` poblado en la respuesta. Las nuevas no arrancan.
+
+**Resume (`POST /sync/resume/:siteId`):**
+- Busca el `sync_run_id` más reciente con alguna fila en estado `pending`, `in_progress` o `failed` para ese país.
+- Resetea `in_progress`/`failed` → `pending` (las vuelve a intentar).
+- Conserva `done` y las salta en el loop.
+
+**Queries útiles:**
+
+```sql
+-- ¿Cómo va la corrida actual?
+SELECT status, COUNT(*) FROM sync_progress
+WHERE sync_run_id = 'MLC-2026-05-23T03-00-00-000Z' GROUP BY status;
+
+-- Últimas categorías que fallaron, con el motivo
+SELECT category_ml_id, error_msg, completed_at FROM sync_progress
+WHERE country = 'MLC' AND status = 'failed'
+ORDER BY completed_at DESC LIMIT 10;
+
+-- Tiempo promedio por categoría en el último sync exitoso
+SELECT AVG(EXTRACT(EPOCH FROM (completed_at - started_at))) AS avg_secs
+FROM sync_progress
+WHERE sync_run_id = (
+  SELECT sync_run_id FROM sync_progress
+  WHERE country = 'MLC' AND status = 'done'
+  ORDER BY completed_at DESC LIMIT 1
+) AND status = 'done';
 ```
 
 ---

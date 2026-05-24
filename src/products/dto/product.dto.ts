@@ -1,4 +1,6 @@
-import { Decimal } from '@prisma/client/runtime/library';
+import { Prisma } from '../../generated/prisma/client';
+
+type Decimal = Prisma.Decimal;
 
 export class ProductResponseDto {
   id: number;

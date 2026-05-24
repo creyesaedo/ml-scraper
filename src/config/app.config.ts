@@ -5,7 +5,11 @@ export interface AppConfig {
   mlClientId: string;
   mlClientSecret: string;
   mlBaseUrl: string;
-  brightdataScrapingBrowserWs: string;
+  decodoApiToken: string;
+  decodoRateLimitPerSec: number;
+  scraperMaxConcurrent: number;
+  scraperFailureThreshold: number;
+  scraperFailureDumpDir: string;
   snapshotSiteIds: string[];
   snapshotCategoryLimit: number | null;
   snapshotCategoriesBySite: Record<string, string[]>;
@@ -53,7 +57,11 @@ export default registerAs(
     mlClientId: process.env.ML_CLIENT_ID ?? '',
     mlClientSecret: process.env.ML_CLIENT_SECRET ?? '',
     mlBaseUrl: process.env.ML_BASE_URL ?? 'https://api.mercadolibre.com',
-    brightdataScrapingBrowserWs: process.env.BRIGHTDATA_SCRAPING_BROWSER_WS ?? '',
+    decodoApiToken: process.env.DECODO_API_TOKEN ?? '',
+    decodoRateLimitPerSec: parseInt(process.env.DECODO_RATE_LIMIT_PER_SEC ?? '10', 10),
+    scraperMaxConcurrent: Math.max(1, parseInt(process.env.SCRAPER_MAX_CONCURRENT ?? '10', 10)),
+    scraperFailureThreshold: Math.max(1, parseInt(process.env.SCRAPER_FAILURE_THRESHOLD ?? '10', 10)),
+    scraperFailureDumpDir: process.env.SCRAPER_FAILURE_DUMP_DIR ?? 'tmp/scraper-failures',
     snapshotSiteIds: parseSiteIds(process.env.SNAPSHOT_SITE_IDS),
     snapshotCategoryLimit: parseCategoryLimit(process.env.SNAPSHOT_CATEGORY_LIMIT),
     snapshotCategoriesBySite: parseCategoriesBySite(),

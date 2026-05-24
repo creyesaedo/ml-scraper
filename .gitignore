@@ -5,6 +5,9 @@ bruno/
 dist/
 build/
 
+# Prisma generated client (Prisma 7)
+src/generated/
+
 # Environment / secrets
 .env
 .env.local
@@ -30,3 +33,6 @@ coverage/
 
 # Misc
 *.tsbuildinfo
+
+# Scratch / debug dumps from local scripts
+tmp/

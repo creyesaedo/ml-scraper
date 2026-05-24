@@ -1,10 +1,13 @@
 generator client {
-  provider = "prisma-client-js"
+  provider            = "prisma-client"
+  output              = "../src/generated/prisma"
+  runtime             = "nodejs"
+  moduleFormat        = "cjs"
+  importFileExtension = ""
 }
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
 }
 
 model Category {
@@ -43,6 +46,13 @@ model Product {
   brand         String?   @db.VarChar(255)
   holiday_name  String?   @db.VarChar(255)
 
+  ranking_position Int?
+  original_price   Decimal? @db.Decimal(14, 2)
+  discount_pct     Int?
+  shipping_type    String?  @db.VarChar(20)
+  listing_type_id  String?  @db.VarChar(20)
+  is_cbt           Boolean  @default(false)
+
   category        Category @relation("ProductCategory", fields: [category_id], references: [id])
   parent_category Category? @relation("ProductParentCategory", fields: [parent_id], references: [id])
   seller          Seller?   @relation(fields: [seller_id], references: [id])
@@ -54,6 +64,23 @@ model Product {
   @@index([catalog_id, snapshot_date])
   @@index([seller_id])
   @@map("products")
+}
+
+model SyncProgress {
+  id              Int       @id @default(autoincrement())
+  sync_run_id     String    @db.VarChar(100)
+  country         String    @db.VarChar(10)
+  category_ml_id  String    @db.VarChar(50)
+  status          String    @db.VarChar(20)
+  error_msg       String?   @db.Text
+  started_at      DateTime?
+  completed_at    DateTime?
+  created_at      DateTime  @default(now())
+
+  @@unique([sync_run_id, category_ml_id])
+  @@index([country, status])
+  @@index([sync_run_id])
+  @@map("sync_progress")
 }
 
 model Seller {

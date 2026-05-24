@@ -25,4 +25,14 @@ export class SyncController {
   collectProductos(@Param('siteId') siteId: string) {
     return this.productCollectionService.collect(siteId);
   }
+
+  /**
+   * Continues the most recent unfinished sync_run for this site, scraping only
+   * categories that are not yet marked 'done'. Use after the circuit breaker
+   * has aborted a run (see CollectionResult.aborted in the previous response).
+   */
+  @Post('resume/:siteId')
+  resumeProductos(@Param('siteId') siteId: string) {
+    return this.productCollectionService.collect(siteId, { resume: true });
+  }
 }
