@@ -2,6 +2,8 @@
 
 Schema definido en [prisma/schema.prisma](prisma/schema.prisma). Cuatro tablas: `categories`, `products`, `sellers`, `sync_progress`.
 
+Cada tabla lista todas sus columnas con dos lentes: **qué dato representa** (lo que es del lado de MercadoLibre) y **valor para market analysis** (por qué la guardamos y qué pregunta de negocio responde).
+
 ---
 
 ## Diagrama de relaciones
@@ -31,13 +33,13 @@ Schema definido en [prisma/schema.prisma](prisma/schema.prisma). Cuatro tablas: 
 
 Categorías de MercadoLibre. Las raíces vienen del endpoint oficial `/sites/{siteId}/categories`. Las hojas se crean durante el scraping de productos cuando aparecen en el breadcrumb.
 
-| Columna | Tipo | Nullable | Descripción | Ejemplo |
+| Columna | Tipo | Null | Qué representa | Valor para análisis |
 |---|---|---|---|---|
-| `id` | `int` (autoincrement) | NO | Clave primaria interna | `42` |
-| `name` | `varchar(255)` | NO | Nombre legible de la categoría | `"Herramientas"` |
-| `country` | `varchar(10)` | NO | Código de país de ML donde existe esta categoría | `"MLC"`, `"MLA"`, `"MLB"` |
-| `ml_id` | `varchar(50)` UNIQUE | NO | ID de MercadoLibre. Único globalmente (los IDs incluyen el prefijo del país) | `"MLC1574"`, `"MLA1051"` |
-| `parent_id` | `int` | **SÍ** | FK a `categories.id`. NULL = categoría raíz. No-null = categoría hoja, apunta a su raíz | `12` o `null` |
+| `id` | `int` PK | NO | Clave primaria interna autoincremental. | Infraestructural — sirve para joins rápidos y como FK desde `products.category_id` / `products.parent_id`. |
+| `name` | `varchar(255)` | NO | Nombre legible de la categoría tal como aparece en ML (ej. `"Herramientas"`, `"Celulares y Teléfonos"`). | Es el label humano de cualquier reporte agregado por categoría — sin él los IDs no se entienden. |
+| `country` | `varchar(10)` | NO | Site de ML donde existe esta categoría (`"MLC"`, `"MLA"`, `"MLB"`, ...). | Permite comparar la misma vertical entre países (ej. "Herramientas Chile vs Argentina") sin mezclar IDs. |
+| `ml_id` | `varchar(50)` UNIQUE | NO | ID de MercadoLibre. Único global (lleva el prefijo del país, ej. `"MLC1574"`, `"MLA1051"`). | Es la única clave estable contra ML: permite reabrir la URL de la categoría, llamar la API oficial y deduplicar entre runs. |
+| `parent_id` | `int` FK | SÍ | FK a `categories.id`. NULL = categoría raíz. No-null = hoja, apunta a su raíz. | Define el árbol de 2 niveles — permite reportar tanto "top de la raíz Herramientas" como "top de la hoja Sierras eléctricas" sin duplicar datos. |
 
 **Índices:**
 - `ml_id` (único) — lookup por ID de ML.
@@ -45,7 +47,7 @@ Categorías de MercadoLibre. Las raíces vienen del endpoint oficial `/sites/{si
 - `parent_id` — listar todas las hojas de una raíz.
 
 **Notas:**
-- El árbol es **de profundidad fija = 2** (raíz → hoja). No hay sub-sub-categorías.
+- El árbol es de **profundidad fija = 2** (raíz → hoja). No hay sub-sub-categorías.
 - Solo se crean hojas que aparecen en productos scrapeados — no todas las hojas existentes en ML están en la DB.
 
 ---
@@ -56,54 +58,54 @@ Categorías de MercadoLibre. Las raíces vienen del endpoint oficial `/sites/{si
 
 ### Campos básicos del producto
 
-| Columna | Tipo | Nullable | Descripción | Ejemplo |
+| Columna | Tipo | Null | Qué representa | Valor para análisis |
 |---|---|---|---|---|
-| `id` | `int` (autoincrement) | NO | Clave primaria | `54321` |
-| `name` | `varchar(500)` | NO | Título del producto como aparece en ML | `"Gata Hidráulica Tasbel 2 Toneladas"` |
-| `price` | `decimal(14, 2)` | NO | Precio en moneda local (sin símbolo, sin separadores de miles, con "country" despues se hace el formato regional) | `44390.00` |
-| `country` | `varchar(10)` | SÍ | Código del site de ML (redundante con `category.country` pero útil para filtros sin JOIN) | `"MLC"` |
-| `snapshot_date` | `timestamp` | NO (default `now()`) | Momento del snapshot. Misma fecha en todas las filas de un mismo sync | `2026-05-23 06:43:06` |
+| `id` | `int` PK | NO | Clave primaria interna autoincremental. | Infraestructural — identifica unívocamente cada snapshot fila para joins. |
+| `name` | `varchar(500)` | NO | Título del producto como aparece en ML (ej. `"Gata Hidráulica Tasbel 2 Toneladas"`). | Permite búsquedas léxicas, agrupación por keywords, y detección de cambios de naming (rebrand, edición especial). |
+| `price` | `decimal(14, 2)` | NO | Precio en moneda local del país (sin símbolo, sin separadores de miles; el formateo se hace por `country` en la capa de presentación). Ej. `44390.00`. | Métrica central para tracking de precios, elasticidad, comparativas competitivas y detección de promos. |
+| `country` | `varchar(10)` | SÍ | Código del site de ML (redundante con `category.country` pero permite filtrar sin JOIN). | Acelera dashboards y queries cross-country sin pagar el costo del JOIN a `categories`. |
+| `snapshot_date` | `timestamp` | NO (default `now()`) | Momento del snapshot. Misma fecha en todas las filas de una misma corrida del sync. | Es el eje temporal — sin él no hay análisis longitudinal. Toda serie de tiempo (precio, ranking, reviews) se construye sobre este campo. |
 
 ### Campos de categorización
 
-| Columna | Tipo | Nullable | Descripción |
-|---|---|---|---|
-| `category_id` | `int` | NO | FK a `categories.id`. Apunta a la **categoría hoja** cuando se pudo resolver el breadcrumb Nav(El de la pagina web de ML). Si no se resolvió, apunta a la raíz |
-| `parent_id` | `int` | SÍ | FK a `categories.id`. Apunta a la **raíz** cuando `category_id` es una hoja. NULL cuando `category_id` ya ES la raíz (no se pudo resolver hoja) |
+| Columna | Tipo | Null | Qué representa | Valor para análisis |
+|---|---|---|---|---|
+| `category_id` | `int` FK | NO | FK a `categories.id`. Apunta a la **hoja** cuando se pudo resolver el breadcrumb del PDP. Si no, apunta a la raíz. | Permite slicing fino: market share por vertical específica (ej. "Sierras inalámbricas") en vez de solo por categoría grande. |
+| `parent_id` | `int` FK | SÍ | FK a `categories.id`. Apunta a la **raíz** cuando `category_id` es hoja. NULL cuando `category_id` ya ES la raíz. | Permite agregar al nivel de raíz sin necesidad de subir el árbol con un JOIN recursivo: `WHERE category_id = X OR parent_id = X`. |
 
 **Lógica**:
 - Si scraper extrajo `categoryId` del breadcrumb → `category_id = leaf`, `parent_id = root`.
 - Si no se pudo resolver → `category_id = root`, `parent_id = NULL`.
 
-**Para "todos los productos de la raíz X"**: `WHERE category_id = X OR parent_id = X`.
-
 ### Campos de identidad y vendedor
 
-| Columna | Tipo | Nullable | Descripción | Ejemplo |
+| Columna | Tipo | Null | Qué representa | Valor para análisis |
 |---|---|---|---|---|
-| `catalog_id` | `varchar(50)` | SÍ | ID del **producto-concepto** en el catálogo de ML. NULL para productos sin página de catálogo (URLs `/up/`) | `"MLC47591525"` |
-| `seller_id` | `int` | SÍ | FK a `sellers.id`. NULL si no se pudo extraer el vendedor del HTML | `7` |
+| `catalog_id` | `varchar(50)` | SÍ | ID del **producto-concepto** en el catálogo de ML (mismo producto compartido por múltiples vendedores en el buy-box). NULL para listings `/up/` sin catálogo. | Permite seguir un producto a lo largo del tiempo aunque cambie el vendedor del buy-box, y agregar metadata via API `/products/{catalog_id}`. Es la clave para series de tiempo product-level. |
+| `ml_public_id` | `varchar(50)` | SÍ | ID de la **publicación específica** (listing) que ganó el buy-box, parseado del bloque "Publicación #NNNNNN" del PDP. Distinto de `catalog_id` — identifica la oferta puntual del vendedor. | Permite reconstruir la URL canónica del listing, deduplicar publicaciones del mismo vendedor y trackear cuándo un mismo `catalog_id` cambia de listing ganador (rotación de buy-box). |
+| `seller_id` | `int` FK | SÍ | FK a `sellers.id`. NULL si no se pudo extraer el vendedor del HTML. | Permite cruzar producto ↔ vendedor para responder "qué vendedores dominan la categoría", "cuál es la fuerza de un seller", "share de Tiendas Oficiales", etc. |
 
-### Campos de enriquecimiento (del HTML del producto + API de ML)
+### Campos de enriquecimiento (HTML del PDP + API de ML)
 
-| Columna | Tipo | Nullable | Descripción | Ejemplo |
+| Columna | Tipo | Null | Qué representa | Valor para análisis |
 |---|---|---|---|---|
-| `date_created` | `timestamp` | SÍ | Fecha en que se creó el catálogo del producto. Viene del API `/products/{catalog_id}` cuando hay `catalog_id`, o del HTML como fallback | `2024-01-15 10:30:00` |
-| `sold_count` | `int` | SÍ | Cantidad aproximada de ventas del catálogo. Parseado del badge "+X mil vendidos". Es un **piso** (la cifra real es ≥) | `10000` |
-| `rating` | `decimal(3, 2)` | SÍ | Rating promedio del catálogo (0–5) | `4.80` |
-| `review_count` | `int` | SÍ | Número de reviews del catálogo | `342` |
-| `brand` | `varchar(255)` | SÍ | Marca declarada en los atributos del producto | `"Apple"`, `"Tasbel"` |
+| `date_created` | `timestamp` | SÍ | Fecha en que se creó el catálogo del producto. Viene del API `/products/{catalog_id}` cuando hay `catalog_id`; fallback al HTML. | Permite medir la **edad del producto** en el top: ¿están dominando lanzamientos recientes o productos legacy? Útil para detectar refresh-rate de catálogos por vertical. |
+| `sold_count` | `int` | SÍ | Cantidad aproximada de ventas históricas del catálogo. Parseado del badge "+X mil/millón vendidos" del PDP. Es un **piso** (la cifra real es ≥). | Único proxy de volumen disponible (la API no lo expone). Ranking complementario al de top-sellers, y delta semanal aproxima velocidad de venta. |
+| `rating` | `decimal(3, 2)` | SÍ | Rating promedio (0–5) del catálogo en ML. | Indicador de calidad percibida — cruza con `discount_pct` para detectar "barato pero malo", o con `power_seller_status` para validar vendedores. |
+| `review_count` | `int` | SÍ | Número total de reviews del catálogo. | Indica madurez y volumen del producto. Un rating de 4.9 con 5 reviews vs 4.5 con 5000 son señales muy distintas — sin este campo el rating es engañoso. |
+| `brand` | `varchar(255)` | SÍ | Marca declarada en los atributos del producto (ej. `"Apple"`, `"Tasbel"`). | Permite agregaciones por marca (market share, premium-precio promedio, presencia en top-N), detectar dominancia de marcas chinas/blancas y benchmarking competitivo. |
+| `holiday_name` | `varchar(255)` | SÍ | Nombre del feriado nacional (ISO inglés, vía API `date.nager.at`) si `snapshot_date` cae exactamente en un feriado del país del site. NULL en días normales. | Permite filtrar/excluir snapshots de fechas atípicas (lunes feriado vs lunes común) y aislar el efecto de feriados sobre precios y rankings. Útil para no contaminar baselines. |
 
-### Campos de market analysis (extraídos del HTML de la página de más vendidos / PDP)
+### Campos de market analysis (HTML de más vendidos / PDP)
 
-| Columna | Tipo | Nullable | Descripción | Ejemplo |
+| Columna | Tipo | Null | Qué representa | Valor para análisis |
 |---|---|---|---|---|
-| `ranking_position` | `int` | SÍ | Posición del producto en la página de **más vendidos** de su categoría raíz al momento del snapshot. 1 = primero. Permite tracking de subidas/bajadas semana a semana | `1`, `17` |
-| `original_price` | `decimal(14, 2)` | SÍ | Precio **antes** del descuento (`previous_price.value` en el buy-box del PDP). NULL cuando el producto no tiene descuento activo | `32990.00` |
-| `discount_pct` | `int` | SÍ | Porcentaje de descuento visible en el buy-box. NULL cuando no hay descuento. Rango válido: 1–100 | `34` |
-| `shipping_type` | `varchar(20)` | SÍ | Tipo de logística del listing ganador del buy-box. Valores: `"full"` (almacén ML), `"cross_border"` (importado, internacional), `"free"` (envío gratis sin FULL), `"standard"` (con costo). NULL si no se pudo detectar | `"full"` |
-| `listing_type_id` | `varchar(20)` | SÍ | Tier de publicación que el vendedor contrató con ML. Valores típicos: `"gold_pro"` (Premium, máx exposición + cuotas sin interés), `"gold_special"` (Clásica), `"gold"`, `"free"`. Proxy de inversión publicitaria del vendedor | `"gold_pro"` |
-| `is_cbt` | `boolean` | NO (default `false`) | `true` si el listing ganador es **cross-border / internacional** (producto importado vía CBT). Detectado por la presencia del bloque `cbt_summary` o el icono `cbt_fsbar_airplane` en el HTML | `true` |
+| `ranking_position` | `int` | SÍ | Posición del producto en la página `/mas-vendidos/{root_id}` al momento del snapshot. 1 = primero, 20 = último. Siempre del ranking de la **raíz** (es la única que ML expone). | Métrica de visibilidad: subir/bajar puestos semana a semana mide momentum. Permite identificar nuevos entrantes al top y productos que están perdiendo terreno. |
+| `original_price` | `decimal(14, 2)` | SÍ | Precio antes del descuento (`previous_price.value` en el buy-box). NULL cuando el producto no tiene descuento activo. | Junto con `price` permite calcular el descuento absoluto y detectar "falsos descuentos" (precio inflado antes de promo). Base para análisis de pricing dinámico. |
+| `discount_pct` | `int` | SÍ | Porcentaje de descuento que ML muestra en el buy-box (1–100). NULL cuando no hay descuento. | Mide intensidad promocional por categoría / país. Permite contestar "qué % del top está en oferta", "cuán agresivo descuenta una marca", o detectar Cyber-events sin saberlo de antemano. |
+| `shipping_type` | `varchar(20)` | SÍ | Tipo logístico del listing ganador. Valores: `"full"` (FULL, almacén ML), `"cross_border"` (importado), `"free"` (gratis sin FULL), `"standard"` (con costo). | Indicador de profesionalización del seller y experiencia del comprador. `full` correlaciona con velocidad y conversión más altas; cross-border señala dependencia de importación. |
+| `listing_type_id` | `varchar(20)` | SÍ | Tier de publicación contratado: `"gold_pro"` (Premium, máx exposición + cuotas), `"gold_special"` (Clásica), `"gold"`, `"free"`. | Proxy de inversión publicitaria del vendedor. Permite estimar cuánto "paga" un seller para mantenerse en el top y modelar barreras de entrada por categoría. |
+| `is_cbt` | `boolean` | NO (default `false`) | `true` si el listing ganador es **cross-border / internacional** (CBT). Detectado por bloque `cbt_summary` o icono `cbt_fsbar_airplane`. | Mide penetración de importadores vs locales en el top. Crítico para verticales (electrónica, fashion) donde el CBT redefine la competencia local. |
 
 **Índices:**
 - `category_id`, `parent_id` — joins con categories.
@@ -113,10 +115,10 @@ Categorías de MercadoLibre. Las raíces vienen del endpoint oficial `/sites/{si
 - `seller_id` — productos de un vendedor.
 
 **Notas sobre los campos de market analysis:**
-- `ranking_position` se setea desde el índice de aparición en la página `/mas-vendidos/{id}` de la **categoría raíz**. Cuando `category_id` apunta a una hoja, el ranking sigue siendo el de la raíz (es la única página que ML expone como ranking).
-- `original_price` y `discount_pct` vienen siempre juntos: si uno es NULL, el otro también lo es. Cuando `discount_pct = 0`, ML omite el bloque y ambos quedan NULL.
-- `shipping_type = "full"` implica que ML maneja el stock — fuerte señal de profesionalización del vendedor.
-- `is_cbt = true` y `shipping_type = "cross_border"` suelen coincidir, pero no son el mismo campo: `is_cbt` mira el origen del producto, `shipping_type` mira la logística. Pueden divergir en CBT con stock en bodega local.
+- `ranking_position` se setea desde el índice de aparición en `/mas-vendidos/{root}`. Aunque el producto se asocie a una hoja vía `category_id`, su ranking sigue siendo el de la raíz.
+- `original_price` y `discount_pct` vienen siempre juntos: si uno es NULL, el otro también lo es.
+- `shipping_type = "full"` implica que ML maneja el stock — fuerte señal de profesionalización.
+- `is_cbt = true` y `shipping_type = "cross_border"` suelen coincidir pero no son lo mismo: `is_cbt` mira el **origen** del producto, `shipping_type` mira la **logística**. Pueden divergir en CBT con stock en bodega local.
 
 ---
 
@@ -124,18 +126,18 @@ Categorías de MercadoLibre. Las raíces vienen del endpoint oficial `/sites/{si
 
 Vendedores con su metadata actual. **Mutable**: se hace UPSERT en cada sync, sobrescribe nickname/status/totales (overwrite latest, no SCD-2).
 
-| Columna | Tipo | Nullable | Descripción | Ejemplo |
+| Columna | Tipo | Null | Qué representa | Valor para análisis |
 |---|---|---|---|---|
-| `id` | `int` (autoincrement) | NO | Clave primaria interna | `7` |
-| `ml_seller_id` | `varchar(50)` UNIQUE | NO | ID numérico del vendedor en ML. Único globalmente | `"818179326"` |
-| `nickname` | `varchar(255)` | SÍ | Nombre público del vendedor | `"LH PET SHOP"`, `"COMERCIALIZADORA-45-..."` |
-| `is_official_store` | `boolean` | NO (default `false`) | `true` si la página muestra "Tienda Oficial" (en vez del nickname normal) | `true` |
-| `power_seller_status` | `varchar(50)` | SÍ | Nivel de MercadoLíder, en minúsculas. Valores típicos: `"platinum"`, `"gold"`, `"silver"`, `"mercadolider"`, `null` (sin badge) | `"platinum"` |
-| `total_products` | `int` | SÍ | Cantidad aproximada de productos publicados por el vendedor. Parseado del badge "+N Productos". Es un **piso** | `1000` |
-| `total_sales` | `int` | SÍ | Cantidad aproximada de ventas totales del vendedor. Parseado del badge "+N Ventas" (acepta "mil" y "millón"). Es un **piso** | `250000` |
-| `country` | `varchar(10)` | SÍ | Site de ML donde se vio por primera vez al vendedor (un vendedor puede operar en múltiples países; aquí se guarda solo el primero observado) | `"MLC"` |
-| `first_seen` | `timestamp` | NO (default `now()`) | Cuándo se vio al vendedor por primera vez en nuestros snapshots | `2026-05-23 06:43:06` |
-| `last_seen` | `timestamp` | NO (default `now()`) | Última corrida del sync en la que apareció. Útil para detectar vendedores "inactivos" | `2026-05-23 06:43:06` |
+| `id` | `int` PK | NO | Clave primaria interna autoincremental. | Infraestructural — FK desde `products.seller_id`. |
+| `ml_seller_id` | `varchar(50)` UNIQUE | NO | ID numérico del vendedor en ML, único globalmente (ej. `"818179326"`). | Clave estable contra ML: permite reabrir el perfil público, llamar la API oficial de users/items y deduplicar el mismo vendedor entre runs y entre países. |
+| `nickname` | `varchar(255)` | SÍ | Nombre público del vendedor (ej. `"LH PET SHOP"`, `"COMERCIALIZADORA-45-..."`). | Label legible para reportes — sin él el `ml_seller_id` es opaco. Ojo: cambia cuando el vendedor lo renombra. |
+| `is_official_store` | `boolean` | NO (default `false`) | `true` si ML marca al vendedor como "Tienda Oficial" (perfil distinto del seller común). | Métrica clave de profesionalización: permite separar "presencia de marca oficial" vs "reseller". Cross-country muestra qué marcas invirtieron en su canal directo. |
+| `power_seller_status` | `varchar(50)` | SÍ | Nivel de MercadoLíder en minúsculas: `"platinum"`, `"gold"`, `"silver"`, `"mercadolider"`, NULL (sin badge). | Indicador de confianza y volumen avalado por ML. Filtrar por Platinum aísla al top operativo; ausencia de badge señala vendedores nuevos o con problemas de reputación. |
+| `total_products` | `int` | SÍ | Cantidad aproximada de productos publicados (parseado del badge "+N Productos"). Es un **piso**. | Tamaño del catálogo — distingue seller boutique vs marketplace operator. Combina con `total_sales` para estimar productos-activos vs long-tail muerta. |
+| `total_sales` | `int` | SÍ | Cantidad aproximada de ventas históricas totales (badge "+N Ventas", acepta "mil"/"millón"). Es un **piso**. | Proxy del tamaño operativo total del vendedor (todas las categorías). Permite ranking de top-sellers globales y estimación de market share absoluta. |
+| `country` | `varchar(10)` | SÍ | Site de ML donde se vio al vendedor por primera vez (un mismo seller puede operar en varios países; guardamos solo el primero observado). | Permite segmentar vendedores por mercado de origen — útil para preguntas como "qué % de los top-sellers en MLM también juegan en MLC". |
+| `first_seen` | `timestamp` | NO (default `now()`) | Cuándo entró el vendedor a nuestros snapshots. | Detecta vendedores **nuevos** en el top (entrada al mercado relevante), no la edad real del seller en ML. |
+| `last_seen` | `timestamp` | NO (default `now()`) | Última corrida del sync donde apareció. | Detecta vendedores que **salieron** del top o desaparecieron (churn). `now() - last_seen > 30d` ≈ inactivo en el ranking. |
 
 **Índices:**
 - `ml_seller_id` (único) — lookup por ID de ML.
@@ -144,7 +146,8 @@ Vendedores con su metadata actual. **Mutable**: se hace UPSERT en cada sync, sob
 
 **Notas importantes:**
 - Los valores "+N" en ML están redondeados hacia abajo. Guardamos el **piso**, no el dato exacto.
-- `is_official_store=true` y un `nickname` raro (ej. `"COMERCIALIZADORA-45-..."`) coexisten: cuando ML detecta tienda oficial, oculta el nickname personal y muestra el nombre de la tienda en otro bloque (que hoy no extraemos como campo separado).
+- `is_official_store=true` y un `nickname` raro (ej. `"COMERCIALIZADORA-45-..."`) coexisten: cuando ML detecta tienda oficial, oculta el nickname personal y muestra el nombre de la tienda en otro bloque (hoy no extraído como campo separado).
+- Como la tabla es **mutable**, no podés reconstruir el `power_seller_status` que tenía un vendedor hace 3 meses. Si necesitás historial de seller, hay que agregar una `seller_snapshots` (no implementado).
 
 ---
 
@@ -165,7 +168,7 @@ LIMIT 10;
 ### Historia de precio de un producto específico
 
 ```sql
-SELECT snapshot_date, price, sold_count, rating
+SELECT snapshot_date, price, original_price, discount_pct, ranking_position
 FROM products
 WHERE catalog_id = 'MLC47591525'
 ORDER BY snapshot_date;
@@ -206,23 +209,46 @@ WHERE first_seen >= NOW() - INTERVAL '30 days'
 ORDER BY total_sales DESC NULLS LAST;
 ```
 
+### Intensidad promocional por categoría (Chile, último snapshot)
+
+```sql
+SELECT c.name AS categoria,
+       COUNT(*) FILTER (WHERE p.discount_pct IS NOT NULL) * 100.0 / COUNT(*) AS pct_en_oferta,
+       AVG(p.discount_pct) FILTER (WHERE p.discount_pct IS NOT NULL) AS descuento_promedio
+FROM products p
+JOIN categories c ON c.id = COALESCE(p.parent_id, p.category_id)
+WHERE p.country = 'MLC'
+  AND p.snapshot_date = (SELECT MAX(snapshot_date) FROM products WHERE country = 'MLC')
+GROUP BY c.name
+ORDER BY pct_en_oferta DESC;
+```
+
+### Excluir snapshots tomados en feriado
+
+```sql
+-- baseline "limpia" sin distorsión de feriado nacional
+SELECT *
+FROM products
+WHERE country = 'MLC' AND holiday_name IS NULL;
+```
+
 ---
 
 ## Tabla `sync_progress`
 
 Checkpoint **por categoría** de cada corrida del sync. Permite (a) saber en qué punto se cayó un sync, (b) retomar lo que faltaba sin re-scrapear lo que ya se hizo. La pobla y mantiene `ProductCollectionService`.
 
-| Columna | Tipo | Nullable | Descripción | Ejemplo |
+| Columna | Tipo | Null | Qué representa | Valor para análisis |
 |---|---|---|---|---|
-| `id` | `int` (autoincrement) | NO | Clave primaria | `123` |
-| `sync_run_id` | `varchar(100)` | NO | ID estable de la corrida. Formato: `{siteId}-{ISO-timestamp con `:` y `.` reemplazados}` | `"MLC-2026-05-23T03-00-00-000Z"` |
-| `country` | `varchar(10)` | NO | Site al que pertenece esta categoría | `"MLC"` |
-| `category_ml_id` | `varchar(50)` | NO | ML ID de la categoría raíz que se está scrapeando | `"MLC1512"` |
-| `status` | `varchar(20)` | NO | `"pending"` \| `"in_progress"` \| `"done"` \| `"failed"` | `"done"` |
-| `error_msg` | `text` | SÍ | Mensaje de error truncado a 1000 chars cuando `status = "failed"` | `"Tripped after 10 consecutive failures..."` |
-| `started_at` | `timestamp` | SÍ | Cuándo arrancó esta categoría (NULL hasta que pasa a `in_progress`) | `2026-05-23 03:00:14` |
-| `completed_at` | `timestamp` | SÍ | Cuándo terminó (done o failed) | `2026-05-23 03:01:02` |
-| `created_at` | `timestamp` | NO (default `now()`) | Cuándo se creó el row (al abrir el sync_run) | `2026-05-23 03:00:00` |
+| `id` | `int` PK | NO | Clave primaria interna autoincremental. | Infraestructural. |
+| `sync_run_id` | `varchar(100)` | NO | ID estable de la corrida. Formato: `{siteId}-{ISO-timestamp con `:` y `.` reemplazados}` (ej. `"MLC-2026-05-23T03-00-00-000Z"`). | Operacional: permite agrupar logs y métricas de una corrida específica, y es lo que `POST /sync/resume/:siteId` usa para retomar. |
+| `country` | `varchar(10)` | NO | Site al que pertenece la categoría que se está procesando. | Permite consultas operacionales "qué quedó pendiente en este país" sin escanear toda la tabla. |
+| `category_ml_id` | `varchar(50)` | NO | ML ID de la categoría raíz que se está scrapeando (ej. `"MLC1512"`). | Operacional: identifica qué categoría falló o quedó pendiente para reintentar puntualmente. |
+| `status` | `varchar(20)` | NO | Estado del checkpoint: `"pending"` \| `"in_progress"` \| `"done"` \| `"failed"`. | Operacional: alimenta dashboards de monitoring de runs y al endpoint `/sync/resume`. |
+| `error_msg` | `text` | SÍ | Mensaje de error truncado a 1000 chars cuando `status = "failed"` (ej. `"Tripped after 10 consecutive failures..."`). | Operacional: post-mortem de runs caídos sin tener que abrir los logs de GitHub Actions. |
+| `started_at` | `timestamp` | SÍ | Cuándo arrancó esta categoría (NULL hasta que pasa a `in_progress`). | Operacional: cálculo de duración por categoría → input para mejorar concurrencia y detectar regresiones de performance. |
+| `completed_at` | `timestamp` | SÍ | Cuándo terminó (done o failed). | Operacional: pareada con `started_at` da la duración real por categoría. |
+| `created_at` | `timestamp` | NO (default `now()`) | Cuándo se creó el row (al abrir el sync_run). | Operacional: identifica cuándo se planificó la categoría, vs cuándo realmente arrancó. |
 
 **Constraints e índices:**
 - `UNIQUE(sync_run_id, category_ml_id)` — un sync_run no puede tener dos filas para la misma categoría.
@@ -234,7 +260,7 @@ Checkpoint **por categoría** de cada corrida del sync. Permite (a) saber en qu�
 2. Al empezar cada categoría → `status = "in_progress"`, `started_at = now()`.
 3. Si termina bien → `status = "done"`, `completed_at = now()`.
 4. Si falla (excepción NO relacionada al circuit breaker) → `status = "failed"`, `error_msg`, `completed_at`. El sync continúa con las demás categorías.
-5. Si el **circuit breaker** dispara → la categoría in-flight se marca `failed`, las que aún estaban `pending` quedan así, y `collect()` retorna con `aborted` poblado en la respuesta. Las nuevas no arrancan.
+5. Si el **circuit breaker** dispara → la categoría in-flight se marca `failed`, las que aún estaban `pending` quedan así, y `collect()` retorna con `aborted` poblado. Las nuevas no arrancan.
 
 **Resume (`POST /sync/resume/:siteId`):**
 - Busca el `sync_run_id` más reciente con alguna fila en estado `pending`, `in_progress` o `failed` para ese país.
