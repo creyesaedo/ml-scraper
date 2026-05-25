@@ -64,7 +64,19 @@ model Product {
   @@index([country, snapshot_date])
   @@index([catalog_id, snapshot_date])
   @@index([seller_id])
+  @@index([country, category_id, snapshot_date])
   @@map("products")
+}
+
+model CatalogProduct {
+  catalog_id    String   @id @db.VarChar(50)
+  name          String   @db.VarChar(500)
+  brand         String?  @db.VarChar(255)
+  first_seen_at DateTime @default(now())
+  last_seen_at  DateTime @default(now())
+
+  @@index([brand])
+  @@map("catalog_products")
 }
 
 model SyncProgress {

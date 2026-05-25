@@ -40,6 +40,7 @@ export class ProductCollectionService {
   // Cache per collect() run to avoid redundant DB/API calls
   private leafCategoryCache = new Map<string, number | null>();
   private sellerCache = new Map<string, number>();
+  private catalogProductCache = new Set<string>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -100,6 +101,25 @@ export class ProductCollectionService {
     }
   }
 
+  private async upsertCatalogProduct(
+    catalogId: string,
+    name: string,
+    brand: string | null,
+    now: Date,
+  ): Promise<void> {
+    if (this.catalogProductCache.has(catalogId)) return;
+    try {
+      await this.prisma.catalogProduct.upsert({
+        where: { catalog_id: catalogId },
+        create: { catalog_id: catalogId, name, brand, first_seen_at: now, last_seen_at: now },
+        update: { last_seen_at: now, brand: brand ?? undefined },
+      });
+      this.catalogProductCache.add(catalogId);
+    } catch (err) {
+      this.logger.warn(`Failed to upsert catalog product ${catalogId}: ${(err as Error).message}`);
+    }
+  }
+
   private async resolveLeafCategory(
     leafMlId: string,
     parentDbId: number,
@@ -136,6 +156,7 @@ export class ProductCollectionService {
   async collect(siteId: string, opts: CollectOptions = {}): Promise<CollectionResult> {
     this.leafCategoryCache.clear();
     this.sellerCache.clear();
+    this.catalogProductCache.clear();
     this.health.reset();
 
     let rootCategories = await this.prisma.category.findMany({
@@ -257,6 +278,16 @@ export class ProductCollectionService {
 
                   const effectiveCatalogId =
                     p.catalog_id ?? pageData.catalog_product_id_from_page ?? null;
+
+                  if (effectiveCatalogId) {
+                    await this.upsertCatalogProduct(
+                      effectiveCatalogId,
+                      p.name,
+                      pageData.brand,
+                      snapshotDate,
+                    );
+                  }
+
                   const apiData = effectiveCatalogId
                     ? await this.mlClient.getCatalogProduct(effectiveCatalogId)
                     : null;

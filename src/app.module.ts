@@ -6,6 +6,7 @@ import { CategoriesModule } from './categories/categories.module';
 import { ProductsModule } from './products/products.module';
 import { SyncModule } from './sync/sync.module';
 import { SchedulerModule } from './scheduler/scheduler.module';
+import { StatsModule } from './stats/stats.module';
 import { AppController } from './app.controller';
 
 // The internal NestJS cron (WeeklySyncJob) is opt-in. GitHub Actions and the
@@ -24,6 +25,7 @@ const internalSchedulerEnabled =
     CategoriesModule,
     ProductsModule,
     SyncModule,
+    StatsModule,
     ...(internalSchedulerEnabled ? [SchedulerModule] : []),
   ],
   controllers: [AppController],

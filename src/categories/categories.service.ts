@@ -6,9 +6,12 @@ import { CategoryResponseDto } from './dto/category.dto';
 export class CategoriesService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async findAll(country?: string): Promise<CategoryResponseDto[]> {
+  async findAll(country?: string, parentOnly?: boolean): Promise<CategoryResponseDto[]> {
     return this.prisma.category.findMany({
-      where: country ? { country } : undefined,
+      where: {
+        ...(country ? { country } : {}),
+        ...(parentOnly ? { parent_id: null } : {}),
+      },
       orderBy: { id: 'asc' },
     });
   }
