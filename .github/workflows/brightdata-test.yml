@@ -1,0 +1,54 @@
+name: Bright Data Test
+
+# Manual, on-demand validation of the Bright Data Web Unlocker scraper against a
+# single MercadoLibre category. Does NOT touch the database or Prisma — it only
+# scrapes 1 category page + its product pages and prints a pass/fail verdict.
+on:
+  workflow_dispatch:
+    inputs:
+      site:
+        description: 'ML site id'
+        required: false
+        default: 'MLC'
+      category:
+        description: 'Parent category ml_id (must have a /mas-vendidos page)'
+        required: false
+        default: 'MLC1648'
+      product_limit:
+        description: 'Max products to scrape from the category'
+        required: false
+        default: '20'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      BRIGHTDATA_API_TOKEN: ${{ secrets.BRIGHTDATA_API_TOKEN }}
+      BRIGHTDATA_ZONE: ${{ vars.BRIGHTDATA_ZONE || 'market_analysis' }}
+      BRD_TEST_SITE: ${{ inputs.site }}
+      BRD_TEST_CATEGORY: ${{ inputs.category }}
+      BRD_TEST_PRODUCT_LIMIT: ${{ inputs.product_limit }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # Only cheerio is needed by the test script; --ignore-scripts skips Prisma's
+      # postinstall (irrelevant here and version-gated).
+      - name: Install dependencies
+        run: npm install --ignore-scripts
+
+      - name: Run Bright Data single-category test
+        run: node scripts/test-brightdata.js
+
+      - name: Upload bad-page dumps
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: brightdata-bad-${{ github.run_id }}
+          path: tmp/brightdata-bad/
+          if-no-files-found: ignore
+          retention-days: 14
