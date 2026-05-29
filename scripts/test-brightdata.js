@@ -73,6 +73,11 @@ const CATEGORY = process.env.BRD_TEST_CATEGORY || 'MLC1648';
 const PRODUCT_LIMIT = parseInt(process.env.BRD_TEST_PRODUCT_LIMIT || '20', 10);
 const CONCURRENCY = parseInt(process.env.BRD_TEST_CONCURRENCY || '5', 10);
 const RATE_PER_1K = parseFloat(process.env.BRD_TEST_RATE_PER_1K || '1.50');
+// When 'false', skip the x-unblock-expect header and let Web Unlocker wait for
+// the full render on its own. Heavy ML pages (CBT/Internacional) render in
+// 27–44s — longer than x-unblock-expect's fixed internal timeout (~25-30s) —
+// so the expect header times those out to a 0-byte 200. Plain render avoids that.
+const USE_EXPECT = (process.env.BRD_TEST_EXPECT || 'true').toLowerCase() !== 'false';
 
 const CHALLENGE_THRESHOLD_BYTES = 50_000;
 
@@ -92,25 +97,26 @@ if (!domain) {
 }
 
 /**
- * Calls Bright Data Web Unlocker for one URL, waiting (via x-unblock-expect) for
- * `expectSelector` to be present in the rendered DOM before the HTML is returned.
- * Returns { url, content, httpStatus, elapsedMs, error }.
+ * Single Web Unlocker request. When `expectSelector` is provided, the
+ * x-unblock-expect header makes BD wait until that selector is present — fixes
+ * ML's head-only streaming-SSR responses, but has a fixed ~25-30s internal
+ * timeout that returns a 0-byte 200 on slower pages. When null, BD auto-renders
+ * with no premature timeout (handles slow pages) but may return head-only.
  *
- * format: 'raw' makes Web Unlocker return the target page's raw HTML as the
- * response body (not a JSON envelope).
+ * format: 'raw' returns the target page's raw HTML as the response body.
  */
-async function scrapeOne(url, expectSelector) {
+async function scrapeOnce(url, expectSelector) {
   const started = Date.now();
   const body = {
     zone: ZONE,
     url,
     format: 'raw',
     country: SITE_COUNTRY[SITE],
-    // x-unblock-expect value is itself a JSON string: {"element": "<css>"}.
-    // This forces JS rendering + a wait until the selector appears, fixing ML's
-    // streaming-SSR head-only race.
-    headers: { 'x-unblock-expect': JSON.stringify({ element: expectSelector }) },
   };
+  if (expectSelector) {
+    // x-unblock-expect value is itself a JSON string: {"element": "<css>"}.
+    body.headers = { 'x-unblock-expect': JSON.stringify({ element: expectSelector }) };
+  }
 
   let res;
   try {
@@ -123,29 +129,39 @@ async function scrapeOne(url, expectSelector) {
       body: JSON.stringify(body),
     });
   } catch (err) {
-    return {
-      url,
-      content: '',
-      httpStatus: 0,
-      elapsedMs: Date.now() - started,
-      error: `network: ${err.message}`,
-    };
+    return { url, content: '', httpStatus: 0, elapsedMs: Date.now() - started, error: `network: ${err.message}` };
   }
 
   const elapsedMs = Date.now() - started;
   const content = await res.text().catch(() => '');
 
   if (!res.ok) {
-    return {
-      url,
-      content: '',
-      httpStatus: res.status,
-      elapsedMs,
-      error: `brightdata http ${res.status}: ${content.slice(0, 200)}`,
-    };
+    return { url, content: '', httpStatus: res.status, elapsedMs, error: `brightdata http ${res.status}: ${content.slice(0, 200)}` };
   }
-
   return { url, content, httpStatus: res.status, elapsedMs };
+}
+
+/**
+ * Hybrid strategy: attempt 1 uses x-unblock-expect (catches head-only by waiting
+ * for the selector). If that comes back empty / below the partial-page threshold
+ * — the signature of the expect-timeout on a slow page — retry once WITHOUT the
+ * expect header so BD waits for the full auto-render. Covers category pages
+ * (need expect) AND slow product pages (need plain) in one path.
+ *
+ * `attempts` counts billed requests so the cost summary stays honest.
+ */
+async function scrapeOne(url, expectSelector) {
+  if (!USE_EXPECT) {
+    const r = await scrapeOnce(url, null);
+    return { ...r, attempts: 1 };
+  }
+  const first = await scrapeOnce(url, expectSelector);
+  if (!first.error && first.content.length >= CHALLENGE_THRESHOLD_BYTES) {
+    return { ...first, attempts: 1 };
+  }
+  // Expect path failed/empty → retry plain (no premature timeout).
+  const second = await scrapeOnce(url, null);
+  return { ...second, attempts: 2, retriedPlain: true };
 }
 
 function parseCategoryHtml(html) {
@@ -198,7 +214,7 @@ function fmtBytes(n) {
   console.log(`Category:    ${CATEGORY}`);
   console.log(`Product cap: ${PRODUCT_LIMIT}`);
   console.log(`Concurrency: ${CONCURRENCY}`);
-  console.log(`JS render:   via x-unblock-expect (wait for selector)`);
+  console.log(`JS render:   ${USE_EXPECT ? 'via x-unblock-expect (wait for selector)' : 'plain (no expect header, full auto-render)'}`);
   console.log('-'.repeat(70));
 
   // ---------- Step 1: category page ----------
@@ -247,6 +263,7 @@ function fmtBytes(n) {
       `size=${fmtBytes(r.content.length).padStart(8)} ` +
       `time=${String(r.elapsedMs).padStart(6)}ms ` +
       `${looksReal ? 'OK ' : 'BAD'} ` +
+      `${r.retriedPlain ? '↻plain ' : '       '}` +
       `${p.name.slice(0, 40)}`,
     );
     if (r.error) console.log(`       ERROR: ${r.error}`);
@@ -262,14 +279,15 @@ function fmtBytes(n) {
   ];
   const realPages = allResults.filter((r) => r.looksReal).length;
   const totalBytes = allResults.reduce((s, r) => s + r.content.length, 0);
-  // With x-unblock-expect enabled, Bright Data bills every request.
-  const billable = allResults.length;
+  // Bright Data bills every request; the hybrid retry can issue 2 per page.
+  const billable = allResults.reduce((s, r) => s + (r.attempts || 1), 0);
+  const retries = allResults.filter((r) => r.retriedPlain).length;
 
   console.log('\n' + '='.repeat(70));
   console.log('SUMMARY');
   console.log('='.repeat(70));
-  console.log(`Total requests sent:     ${allResults.length}`);
-  console.log(`Billable (custom hdr):   ${billable}  (x-unblock-expect → all requests billed)`);
+  console.log(`Pages processed:         ${allResults.length}`);
+  console.log(`Billable requests:       ${billable}  (${retries} needed a plain retry; all requests billed)`);
   console.log(`Real pages (>50KB+mark): ${realPages} / ${allResults.length}  ← key success metric`);
   console.log(`Success rate:            ${((realPages / allResults.length) * 100).toFixed(1)}%`);
   console.log(`Total bytes transferred: ${fmtBytes(totalBytes)}`);
