@@ -93,18 +93,17 @@ TRIGGER: POST /sync/run/:siteId  OR  weekly cron (WeeklySyncJob)
                              │
                              ├─ MlScraperService.scrapeCategoryWithProducts(siteId, categoryMlId)
                              │   │
-                             │   ├─ POST https://scraper-api.decodo.com/v2/scrape per URL
-                             │   │     Body: { url, proxy_pool: 'premium', headless: 'html',
-                             │   │             geo: 'cl|ar|br|mx|...',
-                             │   │             browser_actions: [
-                             │   │               { wait: 4s },
-                             │   │               { scroll_to_bottom: 3s },
-                             │   │               { wait_for_element: SELECTOR, 8s timeout }
-                             │   │             ] }
+                             │   ├─ POST https://api.brightdata.com/request per URL
+                             │   │     Body: { zone, url, format: 'raw',
+                             │   │             country: 'cl|ar|br|mx|...',
+                             │   │             headers: { 'x-unblock-expect':
+                             │   │               '{"element": SELECTOR}' } }   (attempt 1)
                              │   │     SELECTOR: 'li.ui-search-layout__item' (category)
                              │   │            or '.ui-pdp-price' (product)
-                             │   │   Sliding-window rate limiter (DECODO_RATE_LIMIT_PER_SEC) before
-                             │   │   each request; HTTP 429 → 1s backoff + 1 retry (not billed)
+                             │   │   HYBRID: if attempt 1 returns <50KB clean (expect-timeout on a
+                             │   │   slow page) → retry once WITHOUT the header (full auto-render)
+                             │   │   Sliding-window rate limiter (SCRAPER_RATE_LIMIT_PER_SEC) before
+                             │   │   each request; network error / HTTP 429 → 1s backoff + 1 free retry
                              │   ├─ Step 1: Category page → cheerio → 20 products
                              │   ├─ Step 2: 20 product pages in parallel (p-limit(8))
                              │   │   Page <50KB → treat as partial render → EMPTY_ENRICHMENT
@@ -180,53 +179,51 @@ When the circuit breaker trips mid-run, `/sync/run` or `/sync/productos` returns
 **1. Category sync — via MercadoLibre official API.**
 `CategorySyncService` uses `MercadoLibreClient` (axios) to fetch the category tree for a site (e.g. `MLC`). It upserts root categories first (via `prisma.category.upsert`) to get their DB IDs, then fetches their children in parallel with `Promise.allSettled` + `pLimit(8)`. Individual subcategory failures are logged and skipped — they do not abort the full sync.
 
-**2. Product collection — via Decodo Web Scraping API.**
+**2. Product collection — via Bright Data Web Unlocker.**
 
 `MlScraperService` exposes `scrapeCategoryWithProducts(siteId, categoryMlId, productConcurrency = 8)` returning `{ products: ScrapedProduct[], enrichmentsByUrl: Map<string, ProductEnrichment> }`. The map is keyed by `product_url` so callers can look up enrichment without a second scrape. `EMPTY_ENRICHMENT` is the safe-default value returned when a product URL is missing, the page is <50 KB, or the request errors.
 
 Files in `src/adapters/scraper/`:
 - `ml-parsers.ts` — pure functions (`parseCategoryHtml`, `parseProductPageHtml`, `parseSellerFromHtml`) + types/constants (`ScrapedProduct`, `ProductEnrichment`, `EMPTY_ENRICHMENT`, `SITE_DOMAINS`, `SITE_GEO`, `categoryUrl`). No DI dependencies.
-- `ml-scraper.service.ts` — `MlScraperService`. HTTP-only against Decodo; rate limiter + circuit breaker integration.
+- `ml-scraper.service.ts` — `MlScraperService`. HTTP-only against Bright Data Web Unlocker; hybrid render strategy + rate limiter + circuit breaker integration.
 - `scraper-health.service.ts` — `ScraperHealthService` (circuit breaker) and `CircuitBreakerOpenError`.
 - `scraper-semaphore.provider.ts` — process-wide concurrency cap (`SCRAPER_SEMAPHORE`).
 - `scraper.module.ts` — registers all of the above; exports `MlScraperService` and `ScraperHealthService`.
 
-### Decodo request shape
+### Bright Data request shape
 
-HTTP-only — no headless browser runs in our container. For each URL (category and product alike) the service POSTs to `https://scraper-api.decodo.com/v2/scrape` with:
+HTTP-only — no headless browser runs in our container. For each URL (category and product alike) the service POSTs to `https://api.brightdata.com/request` (Bearer auth) with:
 
 ```json
 {
+  "zone": "market_analysis",
   "url": "...",
-  "proxy_pool": "premium",
-  "headless": "html",
-  "geo": "cl",
-  "browser_actions": [
-    { "type": "wait", "wait_time_s": 4 },
-    { "type": "scroll_to_bottom", "timeout_s": 3 },
-    { "type": "wait_for_element",
-      "selector": { "type": "css", "value": "li.ui-search-layout__item OR .ui-pdp-price" },
-      "timeout_s": 8 }
-  ]
+  "format": "raw",
+  "country": "cl",
+  "headers": { "x-unblock-expect": "{\"element\": \"li.ui-search-layout__item OR .ui-pdp-price\"}" }
 }
 ```
 
-**Why this exact configuration:**
+**Why this configuration:**
 
-- `proxy_pool: standard` returns `status_code: 613` ("not able to scrape") for ML — Decodo's standard pool cannot pass the PoW challenge. Premium is the only viable pool.
-- `headless: html` without JS rendering returns the PoW challenge page (~5–11 KB). ML's anti-bot validates TLS fingerprint, HTTP/2 frame ordering, and the runtime `window.snoopy.track('/anubis')` JS signal — only Decodo's premium + headless solver passes.
-- `browser_actions` chain works around a Decodo-side bug: ML pages use streaming SSR (React Server Components). Decodo's renderer sometimes captures HTML before all chunks arrive, returning only the `<head>` (~5–11 KB) with a 200 status. The chain forces (a) a hard 4 s pause for streaming to complete, (b) `scroll_to_bottom` to trigger lazy-hydration sections, (c) `wait_for_element` to verify the price block is in the DOM. With this chain, validation runs hit 100 % success across two verticals (tools + electronics); without it, 5–10 % of requests came back head-only.
+- Web Unlocker bypasses ML's PoW/anti-bot automatically; `format: raw` returns the target page's HTML as the response body. JS rendering is automatic (an internal Chromium engine).
+- `x-unblock-expect` makes Web Unlocker wait until the given CSS selector is present before returning. ML uses streaming SSR (React Server Components); without this wait, Web Unlocker can return the page mid-stream with only the `<head>` populated (~7 KB body, 200 status) — the head-only race. The header is the equivalent of a `wait_for_element`.
+- **But** `x-unblock-expect` has a fixed internal timeout (~25–30 s). Heavy ML pages (CBT/"Internacional" listings) render in 27–44 s, so the header times those out to a **0-byte 200**. Hence the hybrid below.
 
-**Rate limiter:** sliding-window, capped at `DECODO_RATE_LIMIT_PER_SEC` (default 10, the Free/$19 plan ceiling). At real concurrency (8) and ~14 s per request, the effective rate is ~0.6 req/s — the limiter rarely binds. It is defensive against future concurrency increases or burst patterns. HTTP 429 from Decodo gets a 1 s backoff + single retry; per the docs, 429 responses are not billed.
+**Hybrid render strategy** (validated 100 % on MLC1648, ~10 % retry rate):
+1. Attempt with `x-unblock-expect` (fixes head-only on category + fast product pages).
+2. If the response is clean (no hard error) but below the 50 KB partial-page threshold — the expect-timeout signature — retry **once without the header** so Web Unlocker waits for the full auto-render with no premature cutoff. Category pages always succeed on step 1 (plain returns head-only); slow product pages need step 2.
 
-**Billing-aware error handling:** by Decodo's response-code rules, `200`/`204` always bill, `4xx` with non-empty body bills, but `500`/`524`/`613` ("failed to scrape") do not. The failure path (HTML <50 KB → `EMPTY_ENRICHMENT`) treats partial-render successes as soft failures without retrying (a retry would always re-incur cost).
+**Rate limiter:** sliding-window, capped at `SCRAPER_RATE_LIMIT_PER_SEC` (default 10). Web Unlocker has no hard req/s plan tier; the limiter is defensive against burst patterns. Network errors and HTTP 429 each get a 1 s backoff + single free retry (the request never produced a scrape).
+
+**Billing & error handling:** enabling a custom feature (`x-unblock-expect`) makes Bright Data bill **every** request — successful and failed — including the plain retry and 0-byte 200s. (Standard Web Unlocker bills only successful requests; the custom header opts that off.) Errors are surfaced via the `x-brd-err-code` response header even on a 200 (e.g. `client_10050` = the calling IP is not allowed in the zone). The failure path (clean HTML <50 KB → `EMPTY_ENRICHMENT`) treats persistent partial renders as soft failures; a present `x-brd-err-code`, a BD HTTP error, or a network error is a hard failure that feeds the circuit breaker. Diagnose with `format: "json"` — `raw` mode hides BD errors as a 0-byte body.
 
 ### Shared parsers (`ml-parsers.ts`)
 - `parseCategoryHtml(html)` — cheerio extracts `li.ui-search-layout__item` elements → `ScrapedProduct[]`.
 - `parseProductPageHtml(html)` — regex extracts `sold_count` (parsing "+X mil/millón vendidos"), `rating`, `review_count`, `brand`, `date_created`, `catalogProductId`, `categoryId` from inline `<script>` JSON.
 - `parseSellerFromHtml(html)` — multi-pattern fallback for `seller_id`, `nickname`, `official_store_id`, `power_seller_status`, `total_products`, `total_sales`.
 - `categoryUrl(siteId, categoryMlId)` — builds the `/mas-vendidos/{id}` URL using `SITE_DOMAINS`.
-- `SITE_GEO` — 2-letter geo codes for Decodo's `geo` param (`MLC → cl`, etc.).
+- `SITE_GEO` — 2-letter ISO codes for Bright Data's `country` param (`MLC → cl`, etc.).
 
 **3. Per-product enrichment via ML API.**
 For each product with a `catalog_id`, `MercadoLibreClient.getCatalogProduct()` calls `GET /products/{catalog_id}` with a `client_credentials` OAuth2 token. Returns `date_created`. Runs in parallel with the page scraping via `pLimit(8)`.
@@ -265,14 +262,17 @@ Some MercadoLibre parent categories do not have a `/mas-vendidos/{id}` page. The
 The "+X mil vendidos" badge shown on product pages is not exposed through any ML API endpoint accessible with `client_credentials`. It is only available by scraping the product page HTML.
 
 ### Sync duration
-Each category requires 1 category page + 20 product page requests to Decodo plus ~20 ML API calls for `date_created` + 0..N ML API calls for leaf categories not yet in DB. With `p-limit(3)` on categories, a full 32-parent-category sync takes ~13 minutes per site. The cron trigger is still recommended over manual HTTP — runs unattended and never blocks the API.
+Each category requires 1 category page + 20 product page requests to Bright Data (plus ~10% hybrid retries) plus ~20 ML API calls for `date_created` + 0..N ML API calls for leaf categories not yet in DB. Web Unlocker requests take ~15–40 s each (render + anti-bot). With `p-limit(3)` on categories, a full 32-parent-category sync takes ~13–18 minutes per site. The cron trigger is still recommended over manual HTTP — runs unattended and never blocks the API.
 
-### Decodo head-only / streaming-SSR race
-Decodo's headless renderer occasionally returns the HTML before ML's streaming SSR (React Server Components) finishes hydrating the `<body>`. Symptom: response is 5–11 KB with a fully-populated `<head>` (real `<title>`, OG tags, csrf-token, traceparent) but no body. `targetStatus` is 200 so it looks successful, only the size betrays it. Affects both category and product URLs randomly (the same URL fails ~5–10 % of the time without mitigation, succeeds on retry).
+### Head-only / streaming-SSR race (and the opposite: slow-page timeout)
+ML uses streaming SSR (React Server Components), and Web Unlocker exhibits two **opposite** failure modes depending on whether `x-unblock-expect` is used:
 
-**Mitigation** (built into `MlScraperService`): every request chains `wait: 4s` → `scroll_to_bottom: 3s` → `wait_for_element: { selector, timeout_s: 8 }`. Validated at 100 % success across two verticals (`MLC1512` tools, `MLC1648` electronics, 42 pages each in standalone test). Without the chain, plain `wait_for_element` alone was insufficient — it failed identically when ML never rendered the selector, with the same head-only body.
+- **Without the header (plain render):** Web Unlocker can return the page before the `<body>` finishes hydrating — a ~7 KB head-only body with a clean 200. Category `/mas-vendidos` pages reliably hit this.
+- **With the header:** it waits for the selector, fixing head-only — but its fixed ~25–30 s internal timeout returns a **0-byte 200** on pages slower than that. Heavy product pages (CBT/"Internacional") render in 27–44 s and consistently time out.
 
-Cost: every successful Decodo request takes ~14 s instead of ~10 s (the hard `wait` is non-conditional). Cost in $ is unchanged (Decodo bills per request, not per second). Runs overnight via cron so it is invisible to users.
+**Mitigation** (built into `MlScraperService`): the hybrid render strategy — attempt with `x-unblock-expect`; on a clean response below the 50 KB threshold (the expect-timeout signature), retry once without the header so Web Unlocker waits for the full auto-render. Validated 100 % on `MLC1648` (electronics), ~10 % of pages needed the plain retry. Both modes were also confirmed in isolation: plain category → 7 KB head-only; expect on the Dualsense (a 39 s CBT page) → 0 bytes; plain on the same → full 920 KB.
+
+Cost: the ~10 % of pages that retry are billed twice (custom-header billing covers all requests). Runs overnight via cron so the latency is invisible to users.
 
 ## Scaling to multiple sites & platforms
 
@@ -321,26 +321,17 @@ ML has **19 sites** with **484 parent categories total**. Three realistic scopes
 | **Core 8 LatAm** (recommended) | MLA, MLB, MLC, MLM, MCO, MPE, MLU, MLV | 251 | 5.27k | ~22.8k | ~100 min |
 | **All 19 sites** | every ML site | 484 | 10.16k | ~44k | ~2.5 h |
 
-### Decodo cost per month
+### Bright Data cost per month
 
-Decodo prepaid wallet — the more you load, the cheaper each request. Premium+JS rate per tier:
+Web Unlocker is pay-per-request. With the `x-unblock-expect` custom feature **every** request bills (success + failure), and the hybrid retry adds ~10 % more billable requests. The per-1K rate falls as monthly volume grows (commit-based tiers); the figures below use the entry rate of **$1.50/1K** validated in the smoke test, with the ~10 % retry overhead folded in.
 
-| Wallet loaded | Rate per 1K | 1 site (2.9k) | Core 8 (22.8k) | All 19 (44k) |
-|---|---|---:|---:|---:|
-| $19   | $1.50 | $4.37 | $34.23  | $66.02 |
-| $49   | $1.25 | $3.64 | $28.52  | $55.01 |
-| $99   | $1.20 | $3.49 | $27.38  | $52.81 |
-| $249  | $1.15 | $3.35 | $26.24  | $50.61 |
-| $499  | $1.10 | $3.20 | $25.09  | $48.41 |
-| $999  | $1.05 | $3.06 | $23.95  | $46.21 |
-| $1499 | $1.00 | $2.91 | $22.81  | $44.01 |
+| Scope | Req/mo (nominal) | + ~10% retries | Cost/mo @ $1.50/1K |
+|---|---:|---:|---:|
+| 1 site (2.9k) | ~2.9k | ~3.2k | ~$4.80 |
+| Core 8 (22.8k) | ~22.8k | ~25.1k | ~$37.65 |
+| All 19 (44k) | ~44k | ~48.4k | ~$72.60 |
 
-### Practical tier recommendation
-
-- **1 site or Core 8 → stay on the $19 wallet.** Even at Core 8 ($34/mo), the $19 wallet refills monthly with minimal admin overhead. Upgrading to $249 saves only ~$8/mo and ties up 7 months of credit.
-- **All 19 sites → consider $249** ($24/mo savings vs $19 tier, wallet lasts ~5 months). Above $249 the marginal savings flatten (~$2/mo per tier step).
-
-Per-request math: parent_cats × 21 nav (1 cat + 20 prod) × 4.33 weeks/mo. Validated 100 % success rate, no retries factored in.
+Higher monthly volume drops the per-1K rate (Bright Data tiering), so the All-19 figure is a ceiling. Per-request math: parent_cats × 21 nav (1 cat + 20 prod) × 4.33 weeks/mo × 1.1 retry factor.
 
 ## Snapshot frequency recommendation
 
@@ -348,7 +339,7 @@ Per-request math: parent_cats × 21 nav (1 cat + 20 prod) × 4.33 weeks/mo. Vali
 - Captures product ranking shifts, reviews accumulation, pricing trends
 - Typical MercadoLibre dynamics: ~7–10 day cycles for top-seller rotation
 - Per year: ~52 snapshots/category = good granularity for year-over-year analysis
-- Cost at Core 8 scope: ~$34/mo Decodo ($19 tier)
+- Cost at Core 8 scope: ~$38/mo Bright Data (entry rate, incl. retries)
 
 **For additional granularity** (e.g., mid-week snapshots):
 - Add a second cron job via environment config (e.g., Thursday 15 UTC)
@@ -365,18 +356,18 @@ Two safety mechanisms gate every scraper request.
 
 ### Global concurrency semaphore
 
-A single `p-limit(SCRAPER_MAX_CONCURRENT)` instance (default 10) lives in `ScraperModule` and is injected into `MlScraperService`. Every outbound request (category page or product page) acquires a slot before issuing the HTTP call and releases it on completion. The outer p-limits in `ProductCollectionService` (3 categories × 8 products = up to 24 in flight) are still there for batching, but the semaphore enforces the hard ceiling — so the Decodo Free/$19 plan's 10 req/s cap is never exceeded.
+A single `p-limit(SCRAPER_MAX_CONCURRENT)` instance (default 10) lives in `ScraperModule` and is injected into `MlScraperService`. Every outbound request (category page or product page) acquires a slot before issuing the HTTP call and releases it on completion. The outer p-limits in `ProductCollectionService` (3 categories × 8 products = up to 24 in flight) are still there for batching, but the semaphore enforces the hard ceiling on concurrent Bright Data requests.
 
-Configure via `SCRAPER_MAX_CONCURRENT` (env). Set to 1 to fully serialize, or higher if you upgrade the Decodo plan.
+Configure via `SCRAPER_MAX_CONCURRENT` (env). Set to 1 to fully serialize, or higher if your Bright Data zone allows more concurrency.
 
 ### Circuit breaker (`ScraperHealthService`)
 
 Tracks **consecutive hard failures**. A hard failure is:
 - Network error (DNS, TCP, timeout)
-- Decodo HTTP 5xx (gateway error)
-- Decodo `target_status` 5xx or 613 ("failed to scrape" — not billed)
+- Bright Data HTTP error (non-2xx from `api.brightdata.com/request`)
+- A Bright Data `x-brd-err-code` on the response (e.g. `client_10050` = calling IP not in the zone allowlist; proxy/render failures)
 
-NOT a hard failure (do not increment the counter): HTML <50 KB partial renders (returned as `EMPTY_ENRICHMENT`), product pages with no `catalog_id`, categories with no `/mas-vendidos` page.
+NOT a hard failure (do not increment the counter): clean HTML <50 KB partial renders (returned as `EMPTY_ENRICHMENT` after the hybrid plain retry), product pages with no `catalog_id`, categories with no `/mas-vendidos` page.
 
 When the counter reaches `SCRAPER_FAILURE_THRESHOLD` (default 10):
 1. `tripped = true` is set; every subsequent `assertOpen()` throws `CircuitBreakerOpenError`.
@@ -407,9 +398,10 @@ Defined in `src/config/app.config.ts`, read from `.env`:
 | `ML_CLIENT_ID` | `""` | MercadoLibre OAuth2 client ID |
 | `ML_CLIENT_SECRET` | `""` | MercadoLibre OAuth2 client secret |
 | `ML_BASE_URL` | `https://api.mercadolibre.com` | ML API base URL |
-| `DECODO_API_TOKEN` | `""` | Decodo Web Scraping API token (base64). Required. |
-| `DECODO_RATE_LIMIT_PER_SEC` | `10` | Plan req/s cap: Free/$19=10, $49=25, $99=50, $249=100, $499=150, $999+=200. Sliding-window limiter caps `acquire()` calls. |
-| `SCRAPER_MAX_CONCURRENT` | `10` | Hard cap on parallel scraper requests. Prevents the outer p-limits (3×8=24) from blowing past Decodo's plan rate. |
+| `BRIGHTDATA_API_TOKEN` | `""` | Bright Data API key (Bearer token) for Web Unlocker. Required. |
+| `BRIGHTDATA_ZONE` | `market_analysis` | Web Unlocker zone name from the Bright Data control panel. |
+| `SCRAPER_RATE_LIMIT_PER_SEC` | `10` | Defensive sliding-window cap on request starts per second. Web Unlocker has no hard plan req/s tier; guards against burst patterns. |
+| `SCRAPER_MAX_CONCURRENT` | `10` | Hard cap on parallel scraper requests. Bounds the outer p-limits (3×8=24) to what the Bright Data zone allows. |
 | `SCRAPER_FAILURE_THRESHOLD` | `10` | Consecutive hard failures before the circuit breaker trips, aborts the sync, and dumps diagnostics. |
 | `SCRAPER_FAILURE_DUMP_DIR` | `tmp/scraper-failures` | Directory (relative to cwd) where the breaker writes `error.log`, `sample.html`, `context.json` on trip. |
 | `SNAPSHOT_SITE_IDS` | `MLA` | Comma-separated MercadoLibre sites to snapshot weekly (`MLC,MLA,...`). Does not affect category sync (always runs for all sites). |
@@ -487,23 +479,25 @@ See `src/scheduler/weekly-sync.job.ts`. The cron fires once per week at `SYNC_DA
 
 ## Validation script
 
-`scripts/test-decodo.js` is a standalone Node script (uses built-in `fetch` + already-installed `cheerio` + `dotenv`) that validates the scraper end-to-end against MercadoLibre without touching the DB. It scrapes one category + its 20 products with the same `browser_actions` chain used by `MlScraperService`, classifies each result (`OK` / `BAD` based on size + DOM markers), dumps the raw HTML of any failed page into `tmp/decodo-bad/`, and prints a cost projection at the configured rate.
+`scripts/test-brightdata.js` is a standalone Node script (uses built-in `fetch` + already-installed `cheerio`, `dotenv` optional) that validates the scraper end-to-end against MercadoLibre without touching the DB. It scrapes one category + its 20 products with the same hybrid render strategy used by `MlScraperService` (x-unblock-expect → plain retry), classifies each result (`OK` / `BAD` based on size + DOM markers), dumps the raw HTML of any failed page into `tmp/brightdata-bad/`, and prints a billing-aware cost projection.
 
 Run:
 ```bash
-node scripts/test-decodo.js
+node scripts/test-brightdata.js
 # Configurable via env:
-DECODO_TEST_SITE=MLC              # MLA, MLB, MLM, MLC, MCO, MLU, MLP, MLV, MLD, MLE
-DECODO_TEST_CATEGORY=MLC1512      # parent ml_id (must have a /mas-vendidos page)
-DECODO_TEST_PRODUCT_LIMIT=20      # cap on products scraped from the category
-DECODO_TEST_CONCURRENCY=5         # parallel product requests
-DECODO_TEST_RATE_LIMIT=10         # plan req/s cap
-DECODO_TEST_PROXY_POOL=premium    # standard or premium (only premium works for ML)
+BRIGHTDATA_API_TOKEN=...          # required (Bearer token)
+BRIGHTDATA_ZONE=market_analysis   # Web Unlocker zone
+BRD_TEST_SITE=MLC                 # MLA, MLB, MLM, MLC, MCO, MLU, MLP, MLV, MLD, MLE
+BRD_TEST_CATEGORY=MLC1648         # parent ml_id (must have a /mas-vendidos page)
+BRD_TEST_PRODUCT_LIMIT=20         # cap on products scraped from the category
+BRD_TEST_CONCURRENCY=5            # parallel product requests
+BRD_TEST_EXPECT=true              # set false to compare plain render (no x-unblock-expect)
+BRD_TEST_RATE_PER_1K=1.50         # USD per 1000 requests, for the cost projection
 ```
 
-Use as a smoke test after changing Decodo parameters or after Decodo / ML release changes that might affect rendering. ~$0.03 per run (21 requests × $1.50/1K at the Free tier rate).
+It can also be run from GitHub Actions via the **Bright Data Test** workflow (`.github/workflows/brightdata-test.yml`, `workflow_dispatch`). Use as a smoke test after changing Web Unlocker parameters or after Bright Data / ML changes that might affect rendering. ~$0.03 per run. When a request returns a 0-byte body, re-run that URL with `format: "json"` to read `status_code` / `x-brd-err-code`.
 
 ## Tool usage
 
 - **Context7 for new technologies**: whenever integrating a new library, framework or service not already in the project, use the context7 MCP to consult up-to-date documentation before writing code.
-- **`scripts/test-decodo.js`** for smoke-testing the scraper without running the full app or touching the DB.
+- **`scripts/test-brightdata.js`** for smoke-testing the scraper without running the full app or touching the DB.
