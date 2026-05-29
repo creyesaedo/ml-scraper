@@ -45,6 +45,10 @@ interface BrdScrapeResult {
   content: string;
   // Outer HTTP status from the Bright Data API (0 = network error before a response).
   httpStatus: number;
+  // The TARGET page's HTTP status, surfaced by Bright Data in the x-brd-status-code
+  // response header (the outer status stays 200). 404 here means the URL does not
+  // exist — e.g. a category with no /mas-vendidos page. Null when not reported.
+  targetStatus: number | null;
   // Bright Data surfaces target/proxy-side failures via the x-brd-err-code header
   // even when the outer HTTP status is 200 (e.g. client_10050 = IP not allowed in
   // the zone). Null when the request was clean.
@@ -113,6 +117,15 @@ export class MlScraperService {
     const catRes = await this.scrape(url, siteId, CATEGORY_EXPECT_SELECTOR);
     if (catRes.error) {
       this.logger.error(`[${siteId}] Error scraping category ${categoryMlId}: ${catRes.error}`);
+      return { products: [], enrichmentsByUrl };
+    }
+    // A 4xx from the target (typically 404) means this category has no
+    // /mas-vendidos page — a known, expected case, not a render failure.
+    if (catRes.targetStatus && catRes.targetStatus >= 400) {
+      this.logger.warn(
+        `[${siteId}] Category ${categoryMlId} has no /mas-vendidos page ` +
+          `(HTTP ${catRes.targetStatus} at ${url}) — skipping, 0 products`,
+      );
       return { products: [], enrichmentsByUrl };
     }
     if (catRes.content.length < PARTIAL_PAGE_THRESHOLD) {
@@ -209,9 +222,12 @@ export class MlScraperService {
 
       // The expect-timeout signature: clean response (no hard error) but body
       // below threshold. Retry plain so Web Unlocker waits for the full render.
+      // Skip the retry on a 4xx target (e.g. 404 = no /mas-vendidos page) — the
+      // page genuinely doesn't exist, so a retry would just burn a billed request.
       const softEmpty =
         !result.error &&
         !result.brdErrCode &&
+        !(result.targetStatus !== null && result.targetStatus >= 400) &&
         result.content.length < PARTIAL_PAGE_THRESHOLD;
       if (softEmpty) {
         const plain = await this.requestOnce(url, siteId, null, false);
@@ -313,6 +329,7 @@ export class MlScraperService {
       return {
         content: '',
         httpStatus: 0,
+        targetStatus: null,
         brdErrCode: null,
         attempts: 1,
         error: `network: ${msg}${causeStr}`,
@@ -326,19 +343,22 @@ export class MlScraperService {
     }
 
     const brdErrCode = res.headers.get('x-brd-err-code');
+    const targetStatusHeader = res.headers.get('x-brd-status-code');
+    const targetStatus = targetStatusHeader ? parseInt(targetStatusHeader, 10) : null;
     const content = await res.text().catch(() => '');
 
     if (!res.ok) {
       return {
         content: '',
         httpStatus: res.status,
+        targetStatus,
         brdErrCode,
         attempts: 1,
         error: `brightdata http ${res.status}: ${content.slice(0, 200)}`,
       };
     }
 
-    return { content, httpStatus: res.status, brdErrCode, attempts: 1 };
+    return { content, httpStatus: res.status, targetStatus, brdErrCode, attempts: 1 };
   }
 
   /**
