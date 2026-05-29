@@ -487,7 +487,7 @@ node scripts/test-brightdata.js
 # Configurable via env:
 BRIGHTDATA_API_TOKEN=...          # required (Bearer token)
 BRIGHTDATA_ZONE=market_analysis   # Web Unlocker zone
-BRD_TEST_SITE=MLC                 # MLA, MLB, MLM, MLC, MCO, MLU, MLP, MLV, MLD, MLE
+BRD_TEST_SITE=MLC                 # MLA, MLB, MLM, MLC, MCO, MLU, MPE, MLV, MLD, MLE
 BRD_TEST_CATEGORY=MLC1648         # parent ml_id (must have a /mas-vendidos page)
 BRD_TEST_PRODUCT_LIMIT=20         # cap on products scraped from the category
 BRD_TEST_CONCURRENCY=5            # parallel product requests

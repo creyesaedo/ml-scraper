@@ -56,12 +56,12 @@ export const EMPTY_ENRICHMENT: ProductEnrichment = {
 
 export const SITE_DOMAINS: Record<string, string> = {
   MLA: 'mercadolibre.com.ar',
-  MLB: 'mercadolibre.com.br',
+  MLB: 'mercadolivre.com.br',
   MLM: 'mercadolibre.com.mx',
   MLC: 'mercadolibre.cl',
   MCO: 'mercadolibre.com.co',
   MLU: 'mercadolibre.com.uy',
-  MLP: 'mercadolibre.com.pe',
+  MPE: 'mercadolibre.com.pe',
   MLV: 'mercadolibre.com.ve',
   MLD: 'mercadolibre.com.do',
   MLE: 'mercadolibre.com.ec',
@@ -75,7 +75,7 @@ export const SITE_GEO: Record<string, string> = {
   MLC: 'cl',
   MCO: 'co',
   MLU: 'uy',
-  MLP: 'pe',
+  MPE: 'pe',
   MLV: 've',
   MLD: 'do',
   MLE: 'ec',

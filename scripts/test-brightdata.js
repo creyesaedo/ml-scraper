@@ -48,12 +48,12 @@ const ENDPOINT = 'https://api.brightdata.com/request';
 
 const SITE_DOMAINS = {
   MLA: 'mercadolibre.com.ar',
-  MLB: 'mercadolibre.com.br',
+  MLB: 'mercadolivre.com.br',
   MLM: 'mercadolibre.com.mx',
   MLC: 'mercadolibre.cl',
   MCO: 'mercadolibre.com.co',
   MLU: 'mercadolibre.com.uy',
-  MLP: 'mercadolibre.com.pe',
+  MPE: 'mercadolibre.com.pe',
   MLV: 'mercadolibre.com.ve',
   MLD: 'mercadolibre.com.do',
   MLE: 'mercadolibre.com.ec',
@@ -62,7 +62,7 @@ const SITE_DOMAINS = {
 // 2-letter ISO country code for Web Unlocker's `country` param.
 const SITE_COUNTRY = {
   MLA: 'ar', MLB: 'br', MLM: 'mx', MLC: 'cl',
-  MCO: 'co', MLU: 'uy', MLP: 'pe', MLV: 've',
+  MCO: 'co', MLU: 'uy', MPE: 'pe', MLV: 've',
   MLD: 'do', MLE: 'ec',
 };
 

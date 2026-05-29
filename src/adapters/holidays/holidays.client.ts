@@ -11,7 +11,7 @@ const SITE_TO_ISO2: Record<string, string> = {
   MLM: 'MX',
   MCO: 'CO',
   MLU: 'UY',
-  MLP: 'PE',
+  MPE: 'PE',
   MLV: 'VE',
   MLD: 'DO',
   MLE: 'EC',
