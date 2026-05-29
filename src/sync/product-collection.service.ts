@@ -191,7 +191,7 @@ export class ProductCollectionService {
     if (appMode === 'DEVELOPMENT' && !whitelist?.length) {
       throw new Error(
         `[${siteId}] DEVELOPMENT mode requires a whitelist but none is set. ` +
-          `Aborting before any Decodo spend. Verify the CLI overrode ` +
+          `Aborting before any Bright Data spend. Verify the CLI overrode ` +
           `app.snapshotCategoriesBySite before invoking collect().`,
       );
     }

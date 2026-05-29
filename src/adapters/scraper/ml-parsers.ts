@@ -67,7 +67,7 @@ export const SITE_DOMAINS: Record<string, string> = {
   MLE: 'mercadolibre.com.ec',
 };
 
-// 2-letter geo code used by Decodo's `geo` parameter, derived from siteId.
+// 2-letter ISO code used by Bright Data Web Unlocker's `country` parameter, derived from siteId.
 export const SITE_GEO: Record<string, string> = {
   MLA: 'ar',
   MLB: 'br',

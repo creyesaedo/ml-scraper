@@ -29,8 +29,9 @@ export interface FailureSample {
 const MAX_SAMPLES_KEPT = 20;
 
 /**
- * Tracks consecutive *hard* scraper failures (HTTP error, timeout, Decodo
- * status 5xx/613). Partial renders (<50 KB HTML with HTTP 200) are NOT
+ * Tracks consecutive *hard* scraper failures (network error, BD HTTP error, or
+ * a Bright Data x-brd-err-code on the response). Partial renders (<50 KB HTML
+ * with a clean HTTP 200) are NOT
  * failures here — they are handled separately and return EMPTY_ENRICHMENT.
  *
  * When the consecutive count reaches SCRAPER_FAILURE_THRESHOLD:
