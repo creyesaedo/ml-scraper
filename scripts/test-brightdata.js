@@ -66,6 +66,11 @@ const SITE_COUNTRY = {
   MLD: 'do', MLE: 'ec',
 };
 
+// Best-sellers URL slug per site. Spanish sites use "mas-vendidos"; Brazil
+// (Portuguese) uses "mais-vendidos" (mercadolivre.com.br/mas-vendidos → 404).
+const SITE_BESTSELLER_SLUG = { MLB: 'mais-vendidos' };
+const DEFAULT_BESTSELLER_SLUG = 'mas-vendidos';
+
 const TOKEN = process.env.BRIGHTDATA_API_TOKEN;
 const ZONE = process.env.BRIGHTDATA_ZONE || 'market_analysis';
 const SITE = process.env.BRD_TEST_SITE || 'MLC';
@@ -218,7 +223,8 @@ function fmtBytes(n) {
   console.log('-'.repeat(70));
 
   // ---------- Step 1: category page ----------
-  const catUrl = `https://www.${domain}/mas-vendidos/${CATEGORY}`;
+  const slug = SITE_BESTSELLER_SLUG[SITE] || DEFAULT_BESTSELLER_SLUG;
+  const catUrl = `https://www.${domain}/${slug}/${CATEGORY}`;
   console.log(`\n[1/2] Scraping category: ${catUrl}`);
   const t0 = Date.now();
   const catRes = await scrapeOne(catUrl, CATEGORY_EXPECT);

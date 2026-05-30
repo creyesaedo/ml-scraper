@@ -81,9 +81,32 @@ export const SITE_GEO: Record<string, string> = {
   MLE: 'ec',
 };
 
+// URL slug for the "best sellers" section, per site. Spanish sites use
+// "mas-vendidos"; Brazil (Portuguese) uses "mais-vendidos". Verified live:
+// mercadolivre.com.br/mas-vendidos → 404, /mais-vendidos → 200. Sites not listed
+// fall back to the Spanish slug.
+const SITE_BESTSELLER_SLUG: Record<string, string> = {
+  MLB: 'mais-vendidos',
+};
+const DEFAULT_BESTSELLER_SLUG = 'mas-vendidos';
+
+// Sites where MercadoLibre runs a reduced/classifieds-only marketplace with NO
+// best-sellers section at all — every /mas-vendidos[/...] path 404s regardless of
+// language or category. Verified live (2026-05-30): the homepage returns 200 but
+// /mas-vendidos, /mais-vendidos and /mas-vendidos/{cat} all 404. Scraping these
+// only burns billed category requests for 0 products, so callers skip them.
+//   - MLD (Dominican Republic): no best-sellers, no /ofertas either.
+//   - MLV (Venezuela): best-sellers hub 200 but every per-category page 404s.
+export const SITES_WITHOUT_BESTSELLERS = new Set<string>(['MLD', 'MLV']);
+
+export function siteHasBestSellers(siteId: string): boolean {
+  return !SITES_WITHOUT_BESTSELLERS.has(siteId);
+}
+
 export function categoryUrl(siteId: string, categoryMlId: string): string {
   const domain = SITE_DOMAINS[siteId] ?? 'mercadolibre.com.ar';
-  return `https://www.${domain}/mas-vendidos/${categoryMlId}`;
+  const slug = SITE_BESTSELLER_SLUG[siteId] ?? DEFAULT_BESTSELLER_SLUG;
+  return `https://www.${domain}/${slug}/${categoryMlId}`;
 }
 
 export function parseCategoryHtml(html: string): ScrapedProduct[] {
