@@ -251,7 +251,7 @@ HTTP-only — no headless browser runs in our container. For each URL (category 
 - `parseCategoryHtml(html)` — cheerio extracts `li.ui-search-layout__item` elements → `ScrapedProduct[]`.
 - `parseProductPageHtml(html)` — regex extracts `sold_count` (parsing "+X mil/millón vendidos"), `rating`, `review_count`, `brand`, `date_created`, `catalogProductId`, `categoryId` from inline `<script>` JSON.
 - `parseSellerFromHtml(html)` — multi-pattern fallback for `seller_id`, `nickname`, `official_store_id`, `power_seller_status`, `total_products`, `total_sales`.
-- `categoryUrl(siteId, categoryMlId)` — builds the `/mas-vendidos/{id}` URL using `SITE_DOMAINS`.
+- `categoryUrl(siteId, categoryMlId)` — builds the best-sellers URL using `SITE_DOMAINS` + `SITE_BESTSELLER_SLUG` (`/mas-vendidos/{id}` for Spanish sites, `/mais-vendidos/{id}` for Brazil).
 - `SITE_GEO` — 2-letter ISO codes for Bright Data's `country` param (`MLC → cl`, etc.).
 
 **3. Per-product enrichment via ML API.**
@@ -283,6 +283,12 @@ Products that appear in más-vendidos via `/up/` URLs (no catalog product) canno
 
 ### Categories without "más vendidos" page
 Some MercadoLibre parent categories do not have a `/mas-vendidos/{id}` page. These return 0 products and are listed in the `errores` array of the response. This is expected — not a bug.
+
+### Per-site best-sellers URL slug
+The best-sellers section slug is **language-specific**. Spanish sites use `/mas-vendidos/{id}`; **Brazil (MLB)** is Portuguese and uses `/mais-vendidos/{id}` — `mercadolivre.com.br/mas-vendidos` returns a hard 404. `categoryUrl()` resolves the slug per site via `SITE_BESTSELLER_SLUG` (defaults to `mas-vendidos`). Verified live 2026-05-30 across all 10 sites: only MLB differs.
+
+### Markets with no best-sellers section (MLD, MLV)
+`MLD` (Dominican Republic) and `MLV` (Venezuela) run a reduced/classifieds-only MercadoLibre with **no best-sellers section at all** — every `/mas-vendidos[/...]` and `/mais-vendidos` path 404s regardless of category (MLD's homepage is 200 but `/ofertas` 404s too; MLV's hub is 200 but every per-category page 404s). They are listed in `SITES_WITHOUT_BESTSELLERS` (`ml-parsers.ts`); `MlScraperService.scrapeCategoryWithProducts` skips them **before issuing any billed request**, returning 0 products. Note MLV is part of the PRODUCTION Core 8 — it now yields no product data (it never did: all 404), but the skip saves ~30 wasted category requests/run. Category sync (ML API) still runs for these sites; only product scraping is skipped.
 
 ### ML Search API is blocked
 `/sites/{siteId}/search?category=...` returns 403 even with a valid OAuth2 `client_credentials` token. MercadoLibre no longer allows browsing third-party product listings via API. Scraping is the only viable approach.

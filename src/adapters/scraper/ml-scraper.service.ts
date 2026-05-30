@@ -10,6 +10,7 @@ import {
   categoryUrl,
   parseCategoryHtml,
   parseProductPageHtml,
+  siteHasBestSellers,
 } from './ml-parsers';
 import {
   CircuitBreakerOpenError,
@@ -108,6 +109,16 @@ export class MlScraperService {
 
     if (!this.config.brightdataApiToken) {
       this.logger.error('BRIGHTDATA_API_TOKEN is not configured');
+      return { products: [], enrichmentsByUrl };
+    }
+
+    // MercadoLibre runs a reduced marketplace in a few markets (MLD, MLV) with no
+    // best-sellers section — every /mas-vendidos URL 404s. Skip them before
+    // issuing any billed request; they would only return 0 products.
+    if (!siteHasBestSellers(siteId)) {
+      this.logger.warn(
+        `[${siteId}] Site has no best-sellers section — skipping ${categoryMlId} (0 products, no request issued)`,
+      );
       return { products: [], enrichmentsByUrl };
     }
 
