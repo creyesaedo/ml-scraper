@@ -16,6 +16,11 @@ on:
           - DEVELOPMENT
           - PRODUCTION
         default: ''
+      site:
+        description: 'Override siteId for this run (e.g. MLB). Blank = use APP_MODE sites.'
+        required: false
+        type: string
+        default: ''
 
 jobs:
   sync:
@@ -57,7 +62,8 @@ jobs:
         run: npm run build
 
       - name: Run sync
-        run: npm run sync:run
+        # `inputs.site` only set on manual dispatch; blank → no arg → APP_MODE sites.
+        run: npm run sync:run -- ${{ inputs.site }}
 
       - name: Upload failure diagnostics
         if: failure()
