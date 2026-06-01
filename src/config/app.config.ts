@@ -8,9 +8,8 @@ export interface AppConfig {
   mlClientId: string;
   mlClientSecret: string;
   mlBaseUrl: string;
-  brightdataApiToken: string;
-  brightdataZone: string;
-  scraperRateLimitPerSec: number;
+  decodoApiToken: string;
+  decodoRateLimitPerSec: number;
   scraperMaxConcurrent: number;
   scraperFailureThreshold: number;
   scraperFailureDumpDir: string;
@@ -63,9 +62,8 @@ export default registerAs(
       mlClientId: process.env.ML_CLIENT_ID ?? '',
       mlClientSecret: process.env.ML_CLIENT_SECRET ?? '',
       mlBaseUrl: process.env.ML_BASE_URL ?? 'https://api.mercadolibre.com',
-      brightdataApiToken: process.env.BRIGHTDATA_API_TOKEN ?? '',
-      brightdataZone: process.env.BRIGHTDATA_ZONE ?? 'market_analysis',
-      scraperRateLimitPerSec: parseInt(process.env.SCRAPER_RATE_LIMIT_PER_SEC ?? '10', 10),
+      decodoApiToken: process.env.DECODO_API_TOKEN ?? '',
+      decodoRateLimitPerSec: parseInt(process.env.DECODO_RATE_LIMIT_PER_SEC ?? '10', 10),
       scraperMaxConcurrent: Math.max(1, parseInt(process.env.SCRAPER_MAX_CONCURRENT ?? '10', 10)),
       scraperFailureThreshold: Math.max(1, parseInt(process.env.SCRAPER_FAILURE_THRESHOLD ?? '10', 10)),
       scraperFailureDumpDir: process.env.SCRAPER_FAILURE_DUMP_DIR ?? 'tmp/scraper-failures',
