@@ -99,16 +99,29 @@ const DEFAULT_BESTSELLER_SLUG = 'mas-vendidos';
 //   - MLV (Venezuela): best-sellers hub 200 but every per-category page 404s.
 export const SITES_WITHOUT_BESTSELLERS = new Set<string>(['MLD', 'MLV']);
 
+/** True if the site has a best-sellers section worth scraping (see SITES_WITHOUT_BESTSELLERS). */
 export function siteHasBestSellers(siteId: string): boolean {
   return !SITES_WITHOUT_BESTSELLERS.has(siteId);
 }
 
+/**
+ * Builds the best-sellers page URL for a category, picking the right domain and
+ * language slug per site (e.g. ".cl/mas-vendidos/..." vs ".com.br/mais-vendidos/...").
+ * Unknown sites fall back to the Argentine domain and the Spanish slug.
+ */
 export function categoryUrl(siteId: string, categoryMlId: string): string {
   const domain = SITE_DOMAINS[siteId] ?? 'mercadolibre.com.ar';
   const slug = SITE_BESTSELLER_SLUG[siteId] ?? DEFAULT_BESTSELLER_SLUG;
   return `https://www.${domain}/${slug}/${categoryMlId}`;
 }
 
+/**
+ * Parses a best-sellers category page into a list of products. Each list item
+ * yields a name, price (digits only), the catalog id pulled from the link (if
+ * the listing has a catalog page), the product URL, and a 1-based ranking
+ * position. Items without a name are skipped. Returns an empty array on any
+ * parse error so the caller can treat it as "no products" rather than crash.
+ */
 export function parseCategoryHtml(html: string): ScrapedProduct[] {
   try {
     const $ = cheerio.load(html);
@@ -143,6 +156,16 @@ export function parseCategoryHtml(html: string): ScrapedProduct[] {
   }
 }
 
+/**
+ * Extracts enrichment fields from a single product page's raw HTML.
+ *
+ * MercadoLibre embeds most of this data as JSON inside inline <script> tags, so
+ * the function scans the HTML with targeted regexes rather than a DOM parser:
+ * units sold (decoding "+X mil/millón vendidos"), rating and review count,
+ * brand, listing dates and ids, price/discount, shipping type, and the seller
+ * block. Every field is optional — anything not found stays null. This never
+ * throws; missing data simply produces a sparser ProductEnrichment.
+ */
 export function parseProductPageHtml(html: string): ProductEnrichment {
   let sold_count: number | null = null;
   const soldMatch = html.match(/\+([\d.,]+)\s*(mil(?:l[oó]n)?)?\s*vendidos/i);
@@ -252,6 +275,13 @@ export function parseProductPageHtml(html: string): ProductEnrichment {
   };
 }
 
+/**
+ * Extracts the seller profile from a product page. ML renders seller data in
+ * several different shapes (plain JSON, escaped JSON, or visible text) depending
+ * on the page variant, so each field tries a list of patterns and keeps the
+ * first match. Count fields ("X mil ventas", "X productos") are normalized into
+ * plain integers. Fields with no match are left null / false.
+ */
 function parseSellerFromHtml(html: string): {
   seller_ml_id: string | null;
   seller_nickname: string | null;

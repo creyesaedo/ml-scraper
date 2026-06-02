@@ -1,6 +1,11 @@
 import { Controller, Get, Query } from '@nestjs/common';
 import { ProductsService } from './products.service';
 
+/**
+ * Main product API (/products). Exposes paginated/filterable listing plus
+ * catalog search and per-product price history. Query params arrive as strings,
+ * so they are parsed and clamped to safe ranges here before reaching the service.
+ */
 @Controller('products')
 export class ProductsV2Controller {
   constructor(private readonly productsService: ProductsService) {}

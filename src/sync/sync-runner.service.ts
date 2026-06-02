@@ -3,6 +3,10 @@ import { PrismaService } from '../prisma/prisma.service';
 import { CategorySyncService } from './category-sync.service';
 import { ProductCollectionService } from './product-collection.service';
 
+/**
+ * Top-level orchestrator for a full sync of one site. It is the single entry
+ * point shared by all three triggers (GitHub Actions, CLI, and HTTP API).
+ */
 @Injectable()
 export class SyncRunnerService {
   private readonly logger = new Logger(SyncRunnerService.name);
@@ -13,6 +17,15 @@ export class SyncRunnerService {
     private readonly productCollectionService: ProductCollectionService,
   ) {}
 
+  /**
+   * Runs a complete sync for a single site:
+   *   1. If the site has no categories yet, syncs the category tree first.
+   *   2. Always runs product collection (scraping + enrichment).
+   *
+   * Each step is wrapped in its own try/catch so a failure in one does not stop
+   * the other, and the returned object always carries structured status/error
+   * info for the caller to inspect or log.
+   */
   async run(siteId: string): Promise<object> {
     let catResult: object | string = 'omitido (ya existían)';
 

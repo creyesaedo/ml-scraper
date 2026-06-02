@@ -85,6 +85,15 @@ async function warmupDatabase(prisma: PrismaService, logger: Logger): Promise<vo
   }
 }
 
+/**
+ * CLI entry point used by GitHub Actions and local/ad-hoc runs.
+ *
+ * Boots a standalone Nest context (no HTTP server), warms up the database
+ * (Neon's free tier sleeps when idle), figures out which sites to process from
+ * APP_MODE or an optional siteId argument, and runs the sync for each. In
+ * DEVELOPMENT mode it first injects a random category as the whitelist to keep
+ * the run cheap. Exits non-zero if any site fails or the circuit breaker trips.
+ */
 async function main(): Promise<void> {
   const logger = new Logger('SyncCLI');
   const app = await NestFactory.createApplicationContext(AppModule, {

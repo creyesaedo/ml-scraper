@@ -5,6 +5,11 @@ import { PrismaService } from '../prisma/prisma.service';
 export class ProductsService {
   constructor(private readonly prisma: PrismaService) {}
 
+  /**
+   * Returns all product snapshots, newest first, optionally filtered to one
+   * category. Backs the legacy /productos endpoint; unbounded, so it is meant
+   * for small/category-scoped reads rather than browsing the whole table.
+   */
   async findAll(categoryId?: number) {
     return this.prisma.product.findMany({
       where: categoryId !== undefined ? { category_id: categoryId } : undefined,
@@ -12,6 +17,12 @@ export class ProductsService {
     });
   }
 
+  /**
+   * Paginated product search backing the /products endpoint. All filters
+   * (country, category, date range, name search) are optional and combined with
+   * AND; only the columns the frontend needs are selected. Runs the page query
+   * and the total count together and returns the rows plus pagination metadata.
+   */
   async findPaginated(params: {
     page: number;
     limit: number;
@@ -79,6 +90,10 @@ export class ProductsService {
     };
   }
 
+  /**
+   * Typeahead-style search over catalog products by name or brand. Requires at
+   * least 2 characters and returns up to 20 matches, ordered by name.
+   */
   async findCatalogProducts(search: string) {
     if (!search || search.trim().length < 2) {
       throw new BadRequestException('search must be at least 2 characters');
@@ -102,6 +117,12 @@ export class ProductsService {
     });
   }
 
+  /**
+   * Returns the snapshot history (price, ranking, units sold over time) for one
+   * product, ordered oldest to newest. Identify the product by exactly one of
+   * `ml_public_id` (a specific listing) or `catalog_id` (a catalog product);
+   * passing none or both is rejected.
+   */
   async findPriceHistory(params: { ml_public_id?: string; catalog_id?: string }) {
     const { ml_public_id, catalog_id } = params;
 

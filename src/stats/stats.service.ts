@@ -5,6 +5,12 @@ import { PrismaService } from '../prisma/prisma.service';
 export class StatsService {
   constructor(private readonly prisma: PrismaService) {}
 
+  /**
+   * Builds the dashboard summary in a single round of parallel queries: total
+   * products, categories and sellers, the most recent snapshot date, the
+   * product count per country, and the last 52 distinct snapshot dates (about a
+   * year of weekly runs).
+   */
   async getStats() {
     const [totalProducts, totalCategories, totalSellers, latestSnapshot, byCountry, snapshotDates] =
       await Promise.all([
