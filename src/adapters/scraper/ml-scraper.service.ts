@@ -42,6 +42,14 @@ const PARTIAL_PAGE_THRESHOLD = 50_000;
 const CATEGORY_WAIT_SELECTOR = 'li.ui-search-layout__item';
 const PRODUCT_WAIT_SELECTOR = '.ui-pdp-price';
 
+// Ceiling for how long Decodo waits for the target element before returning the
+// HTML it has. wait_for_element exits as soon as the element appears, so raising
+// this only gives slow renders more room — healthy pages are unaffected, and
+// Decodo bills per request (not per second), so a higher value costs nothing.
+// Raised from 8s after observing ML's streaming SSR sometimes needs longer than
+// 8s to paint the price/listing block (it rendered fully at 15s in testing).
+const WAIT_FOR_ELEMENT_TIMEOUT_S = 15;
+
 type DecodoActions = Array<
   | { type: 'wait'; wait_time_s: number }
   | { type: 'scroll_to_bottom'; timeout_s: number }
@@ -196,15 +204,50 @@ export class MlScraperService {
   }
 
   /**
-   * Issues one POST to Decodo with the browser_actions chain that handles ML's
-   * streaming SSR. Returns the rendered HTML or an error description.
+   * Issues a Decodo scrape with the browser_actions chain that handles ML's
+   * streaming SSR, and retries ONCE when the response comes back as a partial
+   * render.
+   *
+   * A "partial render" is a 200 response whose HTML is below
+   * PARTIAL_PAGE_THRESHOLD: Decodo captured the page before ML finished
+   * streaming the <body>, so only the <head> arrived. Decodo reports this as a
+   * success (status 200), so the small size is the only signal. The data we
+   * need lives in the missing body, so a single extra attempt usually recovers
+   * it.
+   *
+   * Only partial renders are retried here. Network errors and HTTP 429 are
+   * already retried inside postScrapeInner; hard failures (5xx / 613) and
+   * expected 4xx (no /mas-vendidos page) are handled by callers and must NOT be
+   * retried, since each retry re-incurs Decodo cost (200s are billed). The retry
+   * can be disabled with SCRAPER_RETRY_PARTIAL_RENDER=false.
    */
   private async scrapeWithWait(
     url: string,
     siteId: string,
     waitSelector: string,
   ): Promise<DecodoScrapeResult> {
-    const body = {
+    const result = await this.postScrape(this.buildScrapeBody(url, siteId, waitSelector));
+
+    if (this.config.scraperRetryPartialRender && this.isPartialRender(result)) {
+      this.logger.warn(
+        `[${siteId}] Partial render (${result.content.length}b) for ${url} — retrying once`,
+      );
+      const retry = await this.postScrape(this.buildScrapeBody(url, siteId, waitSelector));
+      // Keep the retry only if it actually came back fuller; otherwise return the
+      // first result so we never trade a usable response for a worse one.
+      return retry.content.length > result.content.length ? retry : result;
+    }
+
+    return result;
+  }
+
+  /** Builds the Decodo /v2/scrape request body (premium pool + the SSR wait chain). */
+  private buildScrapeBody(
+    url: string,
+    siteId: string,
+    waitSelector: string,
+  ): Record<string, unknown> {
+    return {
       url,
       proxy_pool: 'premium',
       headless: 'html',
@@ -215,12 +258,20 @@ export class MlScraperService {
         {
           type: 'wait_for_element',
           selector: { type: 'css', value: waitSelector },
-          timeout_s: 8,
+          timeout_s: WAIT_FOR_ELEMENT_TIMEOUT_S,
         },
       ] satisfies DecodoActions,
     };
+  }
 
-    return this.postScrape(body);
+  /**
+   * True for a partial render: Decodo returned a 200 (no transport error and no
+   * 4xx/5xx target status) but the HTML is too small to hold the page body.
+   * These are the only responses worth a single retry.
+   */
+  private isPartialRender(res: DecodoScrapeResult): boolean {
+    const targetOk = res.targetStatus === null || res.targetStatus < 400;
+    return !res.error && targetOk && res.content.length < PARTIAL_PAGE_THRESHOLD;
   }
 
   /**

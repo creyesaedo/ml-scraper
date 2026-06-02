@@ -128,7 +128,7 @@ TRIGGER: POST /sync/run/:siteId  OR  weekly cron (WeeklySyncJob)
                              │   │             browser_actions: [
                              │   │               { wait: 4s },
                              │   │               { scroll_to_bottom: 3s },
-                             │   │               { wait_for_element: SELECTOR, 8s timeout }
+                             │   │               { wait_for_element: SELECTOR, 15s timeout }
                              │   │             ] }
                              │   │     SELECTOR: 'li.ui-search-layout__item' (category)
                              │   │            or '.ui-pdp-price' (product)
@@ -237,7 +237,7 @@ HTTP-only — no headless browser runs in our container. For each URL (category 
     { "type": "scroll_to_bottom", "timeout_s": 3 },
     { "type": "wait_for_element",
       "selector": { "type": "css", "value": "li.ui-search-layout__item OR .ui-pdp-price" },
-      "timeout_s": 8 }
+      "timeout_s": 15 }
   ]
 }
 ```
@@ -250,7 +250,7 @@ HTTP-only — no headless browser runs in our container. For each URL (category 
 
 **Rate limiter:** sliding-window, capped at `DECODO_RATE_LIMIT_PER_SEC` (default 10, the Free/$19 plan ceiling). At real concurrency (8) and ~14 s per request, the effective rate is ~0.6 req/s — the limiter rarely binds. It is defensive against future concurrency increases or burst patterns. HTTP 429 from Decodo gets a 1 s backoff + single retry; per the docs, 429 responses are not billed.
 
-**Billing-aware error handling:** by Decodo's response-code rules, `200`/`204` always bill, `4xx` with non-empty body bills, but `500`/`524`/`613` ("failed to scrape") do not. The failure path (HTML <50 KB → `EMPTY_ENRICHMENT`) treats partial-render successes as soft failures without retrying (a retry would always re-incur cost).
+**Billing-aware error handling:** by Decodo's response-code rules, `200`/`204` always bill, `4xx` with non-empty body bills, but `500`/`524`/`613` ("failed to scrape") do not. A partial render (HTML <50 KB with a 200 status) is retried **once** by `scrapeWithWait` (controlled by `SCRAPER_RETRY_PARTIAL_RENDER`, default on); if the retry is still partial, the page degrades to `EMPTY_ENRICHMENT`. Each retry is an extra billed request, which is why it is bounded to one and only triggers on partial renders — hard failures (`5xx`/`613`) and expected `4xx` (no /mas-vendidos page) are never retried.
 
 ### Shared parsers (`ml-parsers.ts`)
 - `parseCategoryHtml(html)` — cheerio extracts `li.ui-search-layout__item` elements → `ScrapedProduct[]`.
@@ -310,7 +310,7 @@ Each category requires 1 category page + up to 20 product page requests to Decod
 ### Decodo head-only / streaming-SSR race
 Decodo's headless renderer occasionally returns the HTML before ML's streaming SSR (React Server Components) finishes hydrating the `<body>`. Symptom: response is 5–11 KB with a fully-populated `<head>` (real `<title>`, OG tags, csrf-token, traceparent) but no body. `targetStatus` is 200 so it looks successful, only the size betrays it. Affects both category and product URLs randomly (the same URL fails ~5–10 % of the time without mitigation, succeeds on retry).
 
-**Mitigation** (built into `MlScraperService`): every request chains `wait: 4s` → `scroll_to_bottom: 3s` → `wait_for_element: { selector, timeout_s: 8 }`. Validated at 100 % success across two verticals (`MLC1512` tools, `MLC1648` electronics, 42 pages each in standalone test). Without the chain, plain `wait_for_element` alone was insufficient — it failed identically when ML never rendered the selector, with the same head-only body.
+**Mitigation** (built into `MlScraperService`): every request chains `wait: 4s` → `scroll_to_bottom: 3s` → `wait_for_element: { selector, timeout_s: 15 }`, and any response that still comes back as a partial render (<50 KB) is retried once (`SCRAPER_RETRY_PARTIAL_RENDER`). `wait_for_element` exits as soon as the selector appears, so the 15 s ceiling only lengthens slow/failing renders — healthy pages are unaffected and the $ cost per request is unchanged. The chain was validated at 100 % success across two verticals (`MLC1512` tools, `MLC1648` electronics, 42 pages each in standalone test); the timeout was later raised from 8 s to 15 s and the single retry added after a live run showed ML occasionally needs longer than 8 s to paint the price block. Without the chain, plain `wait_for_element` alone was insufficient — it failed identically when ML never rendered the selector, with the same head-only body.
 
 Cost: every successful Decodo request takes ~14 s instead of ~10 s (the hard `wait` is non-conditional). Cost in $ is unchanged (Decodo bills per request, not per second). Runs overnight via cron so it is invisible to users.
 
@@ -454,6 +454,7 @@ Defined in `src/config/app.config.ts`, read from `.env`:
 | `SCRAPER_MAX_CONCURRENT` | `10` | Hard cap on parallel scraper requests. Prevents the outer p-limits (3×8=24) from blowing past Decodo's plan rate. |
 | `SCRAPER_FAILURE_THRESHOLD` | `10` | Consecutive hard failures before the circuit breaker trips, aborts the sync, and dumps diagnostics. |
 | `SCRAPER_FAILURE_DUMP_DIR` | `tmp/scraper-failures` | Directory (relative to cwd) where the breaker writes `error.log`, `sample.html`, `context.json` on trip. |
+| `SCRAPER_RETRY_PARTIAL_RENDER` | `true` | Retry a page once when Decodo returns a partial render (200 but HTML <50 KB). Set to `false` to skip the extra billed request and accept rows with null enrichment instead. |
 | `ENABLE_INTERNAL_SCHEDULER` | `false` | Opt-in for the in-process NestJS cron (`WeeklySyncJob`). Off by default to avoid double-scheduling when GitHub Actions or another external trigger is used. |
 | `SNAPSHOT_SITE_IDS` | (ignored) | **Ignored when `APP_MODE` is set.** Kept for backwards compat with manual overrides if you bypass the mode-derived defaults. |
 | `SNAPSHOT_CATEGORY_LIMIT` | unset | Cap on parent categories per site (by `id` ASC). Applies in PRODUCTION mode if you want a partial run. |

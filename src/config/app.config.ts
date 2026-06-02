@@ -13,6 +13,7 @@ export interface AppConfig {
   scraperMaxConcurrent: number;
   scraperFailureThreshold: number;
   scraperFailureDumpDir: string;
+  scraperRetryPartialRender: boolean;
   snapshotSiteIds: string[];
   snapshotCategoryLimit: number | null;
   snapshotCategoriesBySite: Record<string, string[]>;
@@ -77,6 +78,10 @@ export default registerAs(
       scraperMaxConcurrent: Math.max(1, parseInt(process.env.SCRAPER_MAX_CONCURRENT ?? '10', 10)),
       scraperFailureThreshold: Math.max(1, parseInt(process.env.SCRAPER_FAILURE_THRESHOLD ?? '10', 10)),
       scraperFailureDumpDir: process.env.SCRAPER_FAILURE_DUMP_DIR ?? 'tmp/scraper-failures',
+      // Retry a page once when Decodo returns a partial render (200 but body
+      // too small). Defaults to enabled; set to "false" to opt out and save the
+      // extra billed request at the cost of more null-enrichment rows.
+      scraperRetryPartialRender: process.env.SCRAPER_RETRY_PARTIAL_RENDER !== 'false',
       snapshotSiteIds,
       snapshotCategoryLimit: parseCategoryLimit(process.env.SNAPSHOT_CATEGORY_LIMIT),
       snapshotCategoriesBySite,

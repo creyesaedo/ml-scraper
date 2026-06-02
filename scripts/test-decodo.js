@@ -123,9 +123,11 @@ async function scrapeOne(url, waitSelector = null, _retried = false) {
       { type: 'wait', wait_time_s: 4 },
       { type: 'scroll_to_bottom', timeout_s: 3 },
       {
+        // Matches MlScraperService: 15s ceiling, but wait_for_element exits as
+        // soon as the selector appears, so healthy pages are not slowed.
         type: 'wait_for_element',
         selector: { type: 'css', value: waitSelector },
-        timeout_s: 8,
+        timeout_s: 15,
       },
     ];
   }
