@@ -56,7 +56,7 @@ A single env var controls which sites and categories the sync targets:
 
 | `APP_MODE` | Sites scraped | Categories per site | Decodo cost / run |
 |---|---|---|---|
-| `DEVELOPMENT` (default) | `MLC` only | `MLC1648` only (Electrónica Chile) | ~$0.03 (21 requests) |
+| `DEVELOPMENT` (default) | `MLC` only | `MLC1648` only (Electrónica Chile) | ~$0.03 (≤21 requests: 1 category + up to 20 products) |
 | `PRODUCTION` | Core 8: `MLA,MLB,MLC,MLM,MCO,MPE,MLU,MLV` | All parent categories per site | ~$8 (5,270 requests) |
 
 Any other value (including blank) falls back to `DEVELOPMENT` for safety — prevents accidental production spend when the var is mis-typed.
@@ -134,8 +134,10 @@ TRIGGER: POST /sync/run/:siteId  OR  weekly cron (WeeklySyncJob)
                              │   │            or '.ui-pdp-price' (product)
                              │   │   Sliding-window rate limiter (DECODO_RATE_LIMIT_PER_SEC) before
                              │   │   each request; HTTP 429 → 1s backoff + 1 retry (not billed)
-                             │   ├─ Step 1: Category page → cheerio → 20 products
-                             │   ├─ Step 2: 20 product pages in parallel (p-limit(8))
+                             │   ├─ Step 1: Category page → cheerio → 0–20 products
+                             │   │   (a best-sellers page lists *up to* 20; it may
+                             │   │   have as few as 1, or 0 if the section is empty)
+                             │   ├─ Step 2: those N product pages in parallel (p-limit(8))
                              │   │   Page <50KB → treat as partial render → EMPTY_ENRICHMENT
                              │   └─ Returns: { products, enrichmentsByUrl }
                              │
@@ -287,6 +289,9 @@ Products that appear in más-vendidos via `/up/` URLs (no catalog product) canno
 ### Categories without "más vendidos" page
 Some MercadoLibre parent categories do not have a `/mas-vendidos/{id}` page. These return 0 products and are listed in the `errores` array of the response. This is expected — not a bug. The scraper detects the target's HTTP 404 (via Decodo's `status_code`) and logs it explicitly as "Category … has no /mas-vendidos page".
 
+### Variable product count per category (0–20)
+A best-sellers page lists **at most 20** products, but the actual count is whatever ML ranks for that category — it can be **fewer than 20, just 1, or even 0** (an empty but valid section). The scraper never pads to 20: Step 2 enriches exactly the N products parsed from the category page, and "Saved N products" reflects that real N. So a category returning, say, 10 products is normal and not a partial-render failure (those are detected separately by the <50 KB size check, not by product count).
+
 ### Per-site best-sellers URL slug
 The best-sellers section slug is **language-specific**. Spanish sites use `/mas-vendidos/{id}`; **Brazil (MLB)** is Portuguese and uses `/mais-vendidos/{id}` — `mercadolivre.com.br/mas-vendidos` returns a hard 404. `categoryUrl()` resolves the slug per site via `SITE_BESTSELLER_SLUG` (defaults to `mas-vendidos`). Verified live 2026-05-30 across all 10 sites: only MLB differs.
 
@@ -300,7 +305,7 @@ The best-sellers section slug is **language-specific**. Spanish sites use `/mas-
 The "+X mil vendidos" badge shown on product pages is not exposed through any ML API endpoint accessible with `client_credentials`. It is only available by scraping the product page HTML.
 
 ### Sync duration
-Each category requires 1 category page + 20 product page requests to Decodo plus ~20 ML API calls for `date_created` + 0..N ML API calls for leaf categories not yet in DB. With `p-limit(3)` on categories, a full 32-parent-category sync takes ~13 minutes per site. The cron trigger is still recommended over manual HTTP — runs unattended and never blocks the API.
+Each category requires 1 category page + up to 20 product page requests to Decodo (a best-sellers page lists **0–20** products — usually 20, but it can be as few as 1, or 0 when the section is empty) plus 0..20 ML API calls for `date_created` + 0..N ML API calls for leaf categories not yet in DB. With `p-limit(3)` on categories, a full 32-parent-category sync takes ~13 minutes per site. The cron trigger is still recommended over manual HTTP — runs unattended and never blocks the API.
 
 ### Decodo head-only / streaming-SSR race
 Decodo's headless renderer occasionally returns the HTML before ML's streaming SSR (React Server Components) finishes hydrating the `<body>`. Symptom: response is 5–11 KB with a fully-populated `<head>` (real `<title>`, OG tags, csrf-token, traceparent) but no body. `targetStatus` is 200 so it looks successful, only the size betrays it. Affects both category and product URLs randomly (the same URL fails ~5–10 % of the time without mitigation, succeeds on retry).
@@ -375,7 +380,7 @@ Decodo prepaid wallet — the more you load, the cheaper each request. Premium+J
 - **1 site or Core 8 → stay on the $19 wallet.** Even at Core 8 ($34/mo), the $19 wallet refills monthly with minimal admin overhead. Upgrading to $249 saves only ~$8/mo and ties up 7 months of credit.
 - **All 19 sites → consider $249** ($24/mo savings vs $19 tier, wallet lasts ~5 months). Above $249 the marginal savings flatten (~$2/mo per tier step).
 
-Per-request math: parent_cats × 21 nav (1 cat + 20 prod) × 4.33 weeks/mo. Validated 100 % success rate, no retries factored in.
+Per-request math: parent_cats × 21 nav (1 cat + 20 prod) × 4.33 weeks/mo. The 21 is the **per-category ceiling** (a best-sellers page lists 0–20 products); categories with fewer products cost proportionally less, so these figures are upper bounds. Validated 100 % success rate, no retries factored in.
 
 ## Snapshot frequency recommendation
 
