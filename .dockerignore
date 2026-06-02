@@ -1,5 +1,14 @@
+node_modules
+dist
+.git
+.gitignore
+tmp
+coverage
+*.log
+.env
+.env.*
+!.env.example
 .venv
 __pycache__
 *.pyc
 *.pyo
-.env

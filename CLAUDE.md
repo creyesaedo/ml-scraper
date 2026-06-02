@@ -72,7 +72,7 @@ Three services defined in `docker-compose.yml`:
 
 The `Dockerfile` uses a **multi-stage build**:
 - `builder` stage: installs all dependencies (including devDependencies), runs `prisma generate` (emits the client to `src/generated/prisma`), and compiles TypeScript via `nest build`.
-- `production` stage: installs only production dependencies (`--omit=dev`), adds OpenSSL (required by Prisma's CLI), re-runs `prisma generate`, and copies `dist/` from the builder.
+- `production` stage: installs only production dependencies (`--omit=dev`) and adds OpenSSL (required by the Prisma CLI). It does **not** re-run `prisma generate` — the client is already compiled into `dist/` by the builder. `prisma` is a runtime dependency (not a devDependency), so the CLI ships in the image and the `prisma db push` run at container start works without an `npx` network fetch.
 
 ## Prisma 7
 
