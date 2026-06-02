@@ -2,6 +2,11 @@ import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient } from '../generated/prisma/client';
 
+/**
+ * Application-wide database client. Extends Prisma's generated client and wires
+ * in the pg driver adapter (so no native query-engine binary is needed), then
+ * opens the connection when the module starts and closes it on shutdown.
+ */
 @Injectable()
 export class PrismaService extends PrismaClient implements OnModuleInit, OnModuleDestroy {
   constructor() {

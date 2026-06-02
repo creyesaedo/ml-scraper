@@ -21,6 +21,11 @@ function buildCronExpression(): string {
   return `0 ${hour} * * ${day}`;
 }
 
+/**
+ * Optional in-process weekly scheduler. Registered only when
+ * ENABLE_INTERNAL_SCHEDULER=true; otherwise GitHub Actions drives the timing and
+ * this job stays off to avoid running the sync twice.
+ */
 @Injectable()
 export class WeeklySyncJob {
   private readonly logger = new Logger(WeeklySyncJob.name);
@@ -30,6 +35,11 @@ export class WeeklySyncJob {
     private readonly configService: ConfigService,
   ) {}
 
+  /**
+   * Fires on the configured weekly cron and runs a sync for each configured
+   * site in turn. A failure on one site is logged and does not stop the rest,
+   * so the scheduler never crashes mid-run.
+   */
   @Cron(buildCronExpression())
   async handleWeeklySync(): Promise<void> {
     const siteIds =

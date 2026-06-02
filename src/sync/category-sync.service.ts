@@ -8,6 +8,11 @@ export interface CategorySyncResult {
   errores?: string[];
 }
 
+/**
+ * Keeps the local category tree in sync with MercadoLibre's official API. This
+ * is the cheap, API-only step (no scraping) that must run before product
+ * collection, since collection reads parent categories from the database.
+ */
 @Injectable()
 export class CategorySyncService {
   private readonly logger = new Logger(CategorySyncService.name);
@@ -17,6 +22,15 @@ export class CategorySyncService {
     private readonly mlClient: MercadoLibreClient,
   ) {}
 
+  /**
+   * Syncs the root category tree for every MercadoLibre site into the database.
+   *
+   * For each site it fetches the root categories from the official API and
+   * upserts them (insert if new, update the name if already present). Sites are
+   * processed one after another, but the categories within a site are upserted
+   * in parallel. A failure on one site is logged and collected in `errores`; it
+   * does not stop the remaining sites.
+   */
   async sync(): Promise<CategorySyncResult> {
     const sites = await this.mlClient.getSites();
     const errors: string[] = [];

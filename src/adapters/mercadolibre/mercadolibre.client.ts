@@ -12,12 +12,23 @@ interface TokenResponse {
   expires_in: number;
 }
 
+/**
+ * Thin wrapper around MercadoLibre's official REST API.
+ *
+ * It handles OAuth2 authentication transparently: every public method calls
+ * `ensureToken()` first, which fetches a fresh `client_credentials` token only
+ * when the current one is missing or about to expire. Callers never deal with
+ * tokens directly. If no client id/secret is configured, requests are sent
+ * without auth (only public endpoints will work).
+ */
 @Injectable()
 export class MercadoLibreClient {
   private readonly logger = new Logger(MercadoLibreClient.name);
   private readonly http: AxiosInstance;
   private accessToken: string | null = null;
-  private tokenExpiresAt: number = 0; // performance.now() — monotonic, immune to clock changes
+  // Absolute time (from performance.now(), a monotonic clock) after which the
+  // cached token must be renewed. Monotonic so it is immune to system clock changes.
+  private tokenExpiresAt: number = 0;
 
   constructor(
     @Inject(appConfig.KEY)
@@ -30,6 +41,11 @@ export class MercadoLibreClient {
     });
   }
 
+  /**
+   * Makes sure a valid access token is available before an API call. Returns
+   * early if the cached token is still good, or if no credentials are
+   * configured (in which case requests go out unauthenticated).
+   */
   private async ensureToken(): Promise<void> {
     if (this.accessToken && performance.now() < this.tokenExpiresAt) {
       return;
@@ -59,6 +75,7 @@ export class MercadoLibreClient {
     return {};
   }
 
+  /** Lists every MercadoLibre site (one per country, e.g. MLA, MLB, MLC). */
   async getSites(): Promise<Array<{ id: string; name: string }>> {
     await this.ensureToken();
     const resp = await this.http.get<Array<{ id: string; name: string }>>('/sites', {
@@ -67,6 +84,7 @@ export class MercadoLibreClient {
     return resp.data;
   }
 
+  /** Returns the top-level (root) categories for a given site. */
   async getSiteCategories(
     siteId: string,
   ): Promise<Array<{ id: string; name: string }>> {
@@ -78,6 +96,10 @@ export class MercadoLibreClient {
     return resp.data;
   }
 
+  /**
+   * Fetches a single category (its name and child categories) by ML id.
+   * Returns null if the request fails, so callers can skip it without crashing.
+   */
   async getCategory(
     categoryId: string,
   ): Promise<{ name: string; children_categories: Array<{ id: string; name: string }> } | null> {
@@ -93,29 +115,11 @@ export class MercadoLibreClient {
     }
   }
 
-  async searchProducts(
-    siteId: string,
-    categoryId: string,
-    limit: number = 10,
-    sort: string = 'sold_quantity',
-  ): Promise<unknown> {
-    await this.ensureToken();
-    const resp = await this.http.get(`/sites/${siteId}/search`, {
-      params: { category: categoryId, sort, limit },
-      headers: this.authHeaders(),
-    });
-    return resp.data;
-  }
-
-  async getItemsBulk(itemIds: string[]): Promise<unknown[]> {
-    await this.ensureToken();
-    const resp = await this.http.get<unknown[]>('/items', {
-      params: { ids: itemIds.join(',') },
-      headers: this.authHeaders(),
-    });
-    return resp.data;
-  }
-
+  /**
+   * Fetches a catalog product by its catalog id, used to read `date_created`
+   * (when the product was first listed). Returns null on failure so a single
+   * missing product never aborts the sync.
+   */
   async getCatalogProduct(catalogId: string): Promise<{ date_created: string } | null> {
     await this.ensureToken();
     try {

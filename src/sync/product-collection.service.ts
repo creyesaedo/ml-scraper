@@ -33,11 +33,18 @@ export interface CollectOptions {
   resume?: boolean;
 }
 
+/**
+ * The expensive half of a sync: scrapes best-seller products for a site's
+ * categories, enriches them (ML API + product-page data + leaf category +
+ * seller), and stores immutable snapshot rows. Progress is checkpointed per
+ * category so an aborted run can be resumed. See `collect()` for the full flow.
+ */
 @Injectable()
 export class ProductCollectionService {
   private readonly logger = new Logger(ProductCollectionService.name);
 
-  // Cache per collect() run to avoid redundant DB/API calls
+  // Caches scoped to a single collect() run (cleared on entry) to avoid
+  // redundant DB writes and ML API calls for the same leaf/seller/catalog id.
   private leafCategoryCache = new Map<string, number | null>();
   private sellerCache = new Map<string, number>();
   private catalogProductCache = new Set<string>();
@@ -51,6 +58,13 @@ export class ProductCollectionService {
     private readonly health: ScraperHealthService,
   ) {}
 
+  /**
+   * Inserts or updates a seller profile extracted from a product page and
+   * returns its DB id. Sellers are deduped by their MercadoLibre id, and the
+   * result is cached per run so the same seller is written only once. Returns
+   * null when there is no seller id or the write fails (the product is still
+   * saved, just without a seller link).
+   */
   private async upsertSeller(
     enrichment: {
       seller_ml_id: string | null;
@@ -101,6 +115,12 @@ export class ProductCollectionService {
     }
   }
 
+  /**
+   * Records the catalog product (the stable product behind many listings) so we
+   * can search it later. Inserts it the first time we see it and refreshes
+   * `last_seen_at` afterwards. Cached per run to avoid repeat writes; failures
+   * are logged and swallowed since this is secondary to saving the snapshot.
+   */
   private async upsertCatalogProduct(
     catalogId: string,
     name: string,
@@ -120,6 +140,13 @@ export class ProductCollectionService {
     }
   }
 
+  /**
+   * Turns the leaf (deepest) category id read from a product page into a DB
+   * category id. If we already have that category it returns its id; otherwise
+   * it fetches the category from the ML API and creates it under the given
+   * parent. Results (including "not found", stored as null) are cached per run
+   * so each leaf is resolved at most once.
+   */
   private async resolveLeafCategory(
     leafMlId: string,
     parentDbId: number,
@@ -153,6 +180,23 @@ export class ProductCollectionService {
     }
   }
 
+  /**
+   * Scrapes best-seller products for every in-scope parent category of a site,
+   * enriches each product (ML API + product-page data + leaf category + seller)
+   * and saves them as immutable snapshot rows.
+   *
+   * High-level flow:
+   *   1. Load this site's parent categories and narrow them with the configured
+   *      whitelist or limit (DEVELOPMENT mode requires a whitelist as a cost guard).
+   *   2. Open or resume a sync_run and skip categories already marked 'done'.
+   *   3. Process categories 3 at a time; within each, scrape and enrich up to
+   *      20 products 8 at a time, then bulk-insert the snapshot rows.
+   *   4. If the circuit breaker trips, stop launching new categories and return
+   *      `aborted` with the pending/completed lists so the run can be resumed.
+   *
+   * Per-run caches and the circuit breaker are reset on entry. Individual
+   * category failures are collected in `errores` and never abort the whole run.
+   */
   async collect(siteId: string, opts: CollectOptions = {}): Promise<CollectionResult> {
     this.leafCategoryCache.clear();
     this.sellerCache.clear();
@@ -459,6 +503,10 @@ export class ProductCollectionService {
     });
     return { syncRunId, doneCategoryIds: new Set<string>() };
   }
+
+  // The three helpers below move a category's checkpoint row through its
+  // lifecycle (in_progress → done | failed). The sync_progress table is the
+  // source of truth used by resume to know what still needs scraping.
 
   private markCategoryInProgress(syncRunId: string, categoryMlId: string) {
     return this.prisma.syncProgress.update({

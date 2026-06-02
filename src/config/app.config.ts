@@ -22,14 +22,24 @@ export interface AppConfig {
 
 const PROD_CORE_SITES = ['MLA', 'MLB', 'MLC', 'MLM', 'MCO', 'MPE', 'MLU', 'MLV'];
 
+/**
+ * Reads APP_MODE. Only the exact value "PRODUCTION" turns production on;
+ * anything else (blank, typo, unknown) falls back to DEVELOPMENT so a mistake
+ * can never trigger the expensive full production scrape by accident.
+ */
 function parseAppMode(raw: string | undefined): AppMode {
   return raw?.toUpperCase() === 'PRODUCTION' ? 'PRODUCTION' : 'DEVELOPMENT';
 }
 
+/** Picks one of the core sites at random, used as the DEVELOPMENT-mode target. */
 function pickRandomDevelopmentSite(): string {
   return PROD_CORE_SITES[Math.floor(Math.random() * PROD_CORE_SITES.length)];
 }
 
+/**
+ * Parses SNAPSHOT_CATEGORY_LIMIT into a positive integer, or null when unset or
+ * invalid (null means "no limit").
+ */
 function parseCategoryLimit(raw: string | undefined): number | null {
   if (!raw) return null;
   const n = parseInt(raw, 10);

@@ -23,11 +23,22 @@ interface NagerHoliday {
   name: string;
 }
 
+/**
+ * Looks up public holidays per country using the free Nager.Date API, so each
+ * product snapshot can be tagged with the holiday it was taken on (if any).
+ *
+ * Results are cached in memory per (year, country) pair: the first lookup for a
+ * country/year hits the network, every later lookup that same run is served
+ * from the cache. The cache lives only for the process lifetime.
+ */
 @Injectable()
 export class HolidaysClient {
   private readonly logger = new Logger(HolidaysClient.name);
   private readonly http: AxiosInstance;
+  // Cache keyed by "year-ISO2" → map of "YYYY-MM-DD" → holiday name.
   private readonly cache = new Map<string, Map<string, string>>();
+  // Sites we have already warned about having no country mapping, so the
+  // warning is logged only once per site instead of on every lookup.
   private readonly warnedSites = new Set<string>();
 
   constructor() {
@@ -38,6 +49,10 @@ export class HolidaysClient {
     });
   }
 
+  /**
+   * Returns the holiday name for a date in the given site's country, or null if
+   * that date is not a public holiday (or the site has no country mapping).
+   */
   async getHolidayName(date: Date, siteId: string): Promise<string | null> {
     const iso2 = SITE_TO_ISO2[siteId];
     if (!iso2) {
@@ -61,6 +76,11 @@ export class HolidaysClient {
     return yearMap.get(dayKey) ?? null;
   }
 
+  /**
+   * Downloads every public holiday for one country and year and turns it into a
+   * "YYYY-MM-DD" → name lookup map. On network failure it logs the error and
+   * returns an empty map so the sync continues without holiday tags.
+   */
   private async fetchYear(year: number, iso2: string): Promise<Map<string, string>> {
     const map = new Map<string, string>();
     try {
@@ -77,6 +97,7 @@ export class HolidaysClient {
   }
 }
 
+/** Formats a date as "YYYY-MM-DD" in UTC, matching the Nager.Date date format. */
 function formatYmd(date: Date): string {
   const y = date.getUTCFullYear();
   const m = String(date.getUTCMonth() + 1).padStart(2, '0');
