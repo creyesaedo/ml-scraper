@@ -53,15 +53,25 @@ export class MercadoLibreClient {
     if (!this.config.mlClientId || !this.config.mlClientSecret) {
       return;
     }
-    const resp = await this.http.post<TokenResponse>(
-      TOKEN_URL,
-      new URLSearchParams({
-        grant_type: 'client_credentials',
-        client_id: this.config.mlClientId,
-        client_secret: this.config.mlClientSecret,
-      }),
-      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } },
-    );
+    let resp: { data: TokenResponse };
+    try {
+      resp = await this.http.post<TokenResponse>(
+        TOKEN_URL,
+        new URLSearchParams({
+          grant_type: 'client_credentials',
+          client_id: this.config.mlClientId,
+          client_secret: this.config.mlClientSecret,
+        }),
+        { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } },
+      );
+    } catch (err) {
+      // A failed token request means every subsequent ML API call is unusable.
+      // Surface a clear, actionable error (bad credentials vs ML/network down)
+      // instead of letting a raw axios error bubble up through the sync.
+      const msg = errorMessage(err);
+      this.logger.error(`Failed to obtain ML OAuth token: ${msg}`);
+      throw new Error(`MercadoLibre authentication failed: ${msg}`);
+    }
     this.accessToken = resp.data.access_token;
     this.tokenExpiresAt =
       performance.now() + (resp.data.expires_in * 1000 - TOKEN_MARGIN_MS);
@@ -110,7 +120,8 @@ export class MercadoLibreClient {
         children_categories: Array<{ id: string; name: string }>;
       }>(`/categories/${categoryId}`, { headers: this.authHeaders() });
       return resp.data;
-    } catch {
+    } catch (err) {
+      this.logger.warn(`getCategory(${categoryId}) failed: ${errorMessage(err)}`);
       return null;
     }
   }
@@ -128,8 +139,22 @@ export class MercadoLibreClient {
         { headers: this.authHeaders() },
       );
       return { date_created: resp.data.date_created };
-    } catch {
+    } catch (err) {
+      this.logger.warn(`getCatalogProduct(${catalogId}) failed: ${errorMessage(err)}`);
       return null;
     }
   }
+}
+
+/**
+ * Extracts a concise message from an axios/unknown error. For HTTP errors it
+ * prefers the upstream status so a 404 vs 500 vs token failure is visible in
+ * the logs without dumping the whole response.
+ */
+function errorMessage(err: unknown): string {
+  if (axios.isAxiosError(err)) {
+    const status = err.response?.status;
+    return status ? `HTTP ${status}` : err.message;
+  }
+  return err instanceof Error ? err.message : String(err);
 }

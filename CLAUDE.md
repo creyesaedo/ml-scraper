@@ -186,7 +186,15 @@ POST /sync/productos/:siteId # products only (categories must already exist)
 POST /sync/resume/:siteId    # continue the most recent unfinished sync_run for this site
 ```
 
-When the circuit breaker trips mid-run, `/sync/run` or `/sync/productos` returns 200 with `aborted` populated:
+When a **run-level failure** aborts mid-run, `/sync/run` or `/sync/productos` returns 200 with `aborted` populated. `reason` is one of:
+
+| `reason` | Trigger | Recoverable? |
+|---|---|---|
+| `circuit_breaker` | `SCRAPER_FAILURE_THRESHOLD` consecutive hard scraper failures (see below) | Resume after the upstream issue clears |
+| `decodo_account` | Decodo returns HTTP `401`/`402`/`403` — invalid/expired token, **out of balance**, or forbidden. Aborts on the **first** occurrence (every later request fails identically) | Top up the Decodo wallet / fix the token, then resume |
+| `database` | A snapshot insert throws `PrismaClientInitializationError` — the DB (e.g. Neon) is unreachable mid-run | Wait for the DB to come back, then resume |
+
+All three stop launching new categories and checkpoint progress so the run is resumable via `POST /sync/resume/:siteId`. `consecutive_failures`/`threshold`/`diagnostics_dir` are populated by the circuit breaker; for `decodo_account`/`database` they reflect breaker state at abort time (usually 0 / null).
 
 ```json
 {
@@ -251,6 +259,8 @@ HTTP-only — no headless browser runs in our container. For each URL (category 
 **Rate limiter:** sliding-window, capped at `DECODO_RATE_LIMIT_PER_SEC` (default 10, the Free/$19 plan ceiling). At real concurrency (8) and ~14 s per request, the effective rate is ~0.6 req/s — the limiter rarely binds. It is defensive against future concurrency increases or burst patterns. HTTP 429 from Decodo gets a 1 s backoff + single retry; per the docs, 429 responses are not billed.
 
 **Billing-aware error handling:** by Decodo's response-code rules, `200`/`204` always bill, `4xx` with non-empty body bills, but `500`/`524`/`613` ("failed to scrape") do not. A partial render (HTML <50 KB with a 200 status) is retried **once** by `scrapeWithWait` (controlled by `SCRAPER_RETRY_PARTIAL_RENDER`, default on); if the retry is still partial, the page degrades to `EMPTY_ENRICHMENT`. Each retry is an extra billed request, which is why it is bounded to one and only triggers on partial renders — hard failures (`5xx`/`613`) and expected `4xx` (no /mas-vendidos page) are never retried.
+
+**Account-level Decodo errors** (`401`/`402`/`403`) are handled separately from per-request failures: they signal a bad/expired token, an empty wallet (**out of balance**), or a forbidden request — conditions that affect *every* subsequent request. `postScrape` throws `DecodoAccountError` (a `ScraperAbortError`) on the first such response, aborting the whole run with `reason: 'decodo_account'` instead of letting it fall through to the soft-failure path (a `402` is not a 5xx, so it would otherwise reset the breaker via `reportSuccess()` and the run would silently churn to completion with 0 products). See [Run-level aborts](#run-level-aborts-scraperaborterror).
 
 ### Shared parsers (`ml-parsers.ts`)
 - `parseCategoryHtml(html)` — cheerio extracts `li.ui-search-layout__item` elements → `ScrapedProduct[]`.
@@ -430,6 +440,15 @@ When the counter reaches `SCRAPER_FAILURE_THRESHOLD` (default 10):
    - Returns `CollectionResult.aborted` populated with `pending_categories`, `completed_categories`, and `diagnostics_dir`
 
 A single success resets the counter to 0. The breaker is reset at the start of each `collect()` call.
+
+### Run-level aborts (`ScraperAbortError`)
+
+`CircuitBreakerOpenError` is one of a small family of **run-level** errors that all extend the abstract `ScraperAbortError` (in `scraper-health.service.ts`). They share one contract: they are non-recoverable within the current run, so `MlScraperService` re-throws any `ScraperAbortError` (rather than degrading to `EMPTY_ENRICHMENT`) and `ProductCollectionService` stops launching new categories, checkpoints progress, and returns `aborted`.
+
+- **`CircuitBreakerOpenError`** → `reason: 'circuit_breaker'` (the consecutive-hard-failure breaker above).
+- **`DecodoAccountError`** → `reason: 'decodo_account'`. Thrown the instant Decodo replies `401`/`402`/`403` (bad/expired token, **out of balance**, or forbidden). These are account-wide: every subsequent request would fail identically and `402` is *not* a 5xx, so it would otherwise slip past the breaker's hard-failure check (and even reset the counter via `reportSuccess()`). Aborting on the first occurrence stops the run from grinding through every category with empty results — and from spending more Decodo credit.
+
+A third run-level abort lives in `ProductCollectionService` itself: a snapshot insert throwing Prisma's `PrismaClientInitializationError` (DB unreachable, e.g. Neon down) aborts with `reason: 'database'` — there is no point paying Decodo to scrape rows that cannot be stored. (Note: this relies on Prisma surfacing the connection failure as `PrismaClientInitializationError`; a mid-query drop that surfaces as a different error class falls back to the per-category soft-failure path and is collected in `errores` instead of aborting.)
 
 ### Resume after abort
 

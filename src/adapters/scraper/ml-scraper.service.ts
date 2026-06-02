@@ -13,7 +13,8 @@ import {
   siteHasBestSellers,
 } from './ml-parsers';
 import {
-  CircuitBreakerOpenError,
+  DecodoAccountError,
+  ScraperAbortError,
   ScraperHealthService,
 } from './scraper-health.service';
 import { SCRAPER_SEMAPHORE, ScraperSlot } from './scraper-semaphore.provider';
@@ -186,9 +187,9 @@ export class MlScraperService {
     try {
       res = await this.scrapeWithWait(productUrl, siteId, PRODUCT_WAIT_SELECTOR);
     } catch (err) {
-      // CircuitBreakerOpenError MUST propagate so the whole sync aborts.
-      // Anything else is a soft per-product failure.
-      if (err instanceof CircuitBreakerOpenError) throw err;
+      // Run-level aborts (circuit breaker, Decodo account error) MUST propagate
+      // so the whole sync stops. Anything else is a soft per-product failure.
+      if (err instanceof ScraperAbortError) throw err;
       this.logger.warn(`Unexpected error scraping ${productUrl}: ${(err as Error).message}`);
       return EMPTY_ENRICHMENT;
     }
@@ -286,6 +287,18 @@ export class MlScraperService {
     return this.slot(async () => {
       this.health.assertOpen();
       const result = await this.postScrapeInner(body, false);
+
+      // Account-level Decodo failure (out of balance / bad token / forbidden).
+      // These are NOT >= 500, so they would otherwise slip past the hard-failure
+      // check below and even reset the breaker via reportSuccess(), letting the
+      // run grind through every category with empty results. Abort the run now.
+      if (isDecodoAccountError(result.decodoStatus)) {
+        const msg =
+          `Decodo refused the request (HTTP ${result.decodoStatus}) — ` +
+          `out of balance or invalid token`;
+        this.logger.error(`${msg}. Aborting sync. url=${String(body.url ?? '')}`);
+        throw new DecodoAccountError(result.decodoStatus, msg);
+      }
 
       const targetStatus = result.targetStatus;
       const isHardFailure =
@@ -413,4 +426,14 @@ export class MlScraperService {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * True for Decodo HTTP statuses that signal an account problem rather than a
+ * per-request failure: 401 (bad/expired token), 402 (out of balance / payment
+ * required), 403 (forbidden). Retrying or scraping other URLs cannot recover
+ * from these, so they abort the whole run.
+ */
+function isDecodoAccountError(decodoStatus: number): boolean {
+  return decodoStatus === 401 || decodoStatus === 402 || decodoStatus === 403;
 }

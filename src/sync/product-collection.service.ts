@@ -6,10 +6,15 @@ import { MercadoLibreClient } from '../adapters/mercadolibre/mercadolibre.client
 import { EMPTY_ENRICHMENT } from '../adapters/scraper/ml-parsers';
 import { MlScraperService } from '../adapters/scraper/ml-scraper.service';
 import {
-  CircuitBreakerOpenError,
+  DecodoAccountError,
+  ScraperAbortError,
   ScraperHealthService,
 } from '../adapters/scraper/scraper-health.service';
+import { Prisma } from '../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+
+/** Why a run stopped early: scraper health, Decodo account, or the database. */
+export type AbortReason = 'circuit_breaker' | 'decodo_account' | 'database';
 
 export interface CollectionResult {
   site_id: string;
@@ -19,7 +24,7 @@ export interface CollectionResult {
   snapshot_date: string;
   errores?: string[];
   aborted?: {
-    reason: 'circuit_breaker';
+    reason: AbortReason;
     consecutive_failures: number;
     threshold: number;
     diagnostics_dir: string | null;
@@ -174,7 +179,10 @@ export class ProductCollectionService {
       this.logger.log(`Created leaf category ${leafMlId} → "${data.name}" (parent_id=${parentDbId})`);
       this.leafCategoryCache.set(leafMlId, created.id);
       return created.id;
-    } catch {
+    } catch (err) {
+      this.logger.warn(
+        `Failed to resolve leaf category ${leafMlId} (parent_id=${parentDbId}): ${(err as Error).message}`,
+      );
       this.leafCategoryCache.set(leafMlId, null);
       return null;
     }
@@ -289,12 +297,16 @@ export class ProductCollectionService {
     let totalProducts = 0;
     const errors: string[] = [];
     const completedCategories: string[] = [];
-    let breakerError: CircuitBreakerOpenError | null = null;
+    // Set when a run-level failure occurs (circuit breaker, Decodo account
+    // error, or DB unreachable). Once set, no new categories are launched and
+    // the run ends with `aborted` populated so it can be resumed.
+    let abortError: Error | null = null;
+    let abortReason: AbortReason | null = null;
 
     await Promise.all(
       remaining.map((rootCat) =>
         categoryLimit(async () => {
-          if (breakerError) return; // skip new work once breaker tripped
+          if (abortError) return; // skip new work once a fatal failure occurred
           await this.markCategoryInProgress(syncRunId, rootCat.ml_id);
 
           try {
@@ -406,9 +418,23 @@ export class ProductCollectionService {
             await this.markCategoryDone(syncRunId, rootCat.ml_id);
             completedCategories.push(rootCat.ml_id);
           } catch (err) {
-            if (err instanceof CircuitBreakerOpenError) {
-              breakerError = err;
+            // Run-level scraper aborts: circuit breaker or Decodo account error.
+            if (err instanceof ScraperAbortError) {
+              abortError = err;
+              abortReason =
+                err instanceof DecodoAccountError ? 'decodo_account' : 'circuit_breaker';
               await this.markCategoryFailed(syncRunId, rootCat.ml_id, err.message);
+              return;
+            }
+            // Database unreachable (e.g. Neon asleep/down). Every later save
+            // would fail the same way, so abort instead of paying Decodo for
+            // data we cannot store. Guard the checkpoint write — it hits the
+            // same dead DB — so it never masks the original error.
+            if (err instanceof Prisma.PrismaClientInitializationError) {
+              abortError = err;
+              abortReason = 'database';
+              this.logger.error(`[${siteId}] Database unreachable — aborting sync: ${err.message}`);
+              await this.markCategoryFailed(syncRunId, rootCat.ml_id, err.message).catch(() => undefined);
               return;
             }
             const msg = (err as Error).message;
@@ -428,13 +454,18 @@ export class ProductCollectionService {
     };
     if (errors.length) result.errores = errors;
 
-    if (breakerError) {
+    // Casts: TS does not track these let-variables being mutated inside the
+    // Promise.all closures above, so after the loop it still believes they are
+    // null. Reassert their real types before reading them.
+    const fatalError = abortError as Error | null;
+    const fatalReason = abortReason as AbortReason | null;
+    if (fatalError && fatalReason) {
       const pending = remaining
         .map((c) => c.ml_id)
         .filter((id) => !completedCategories.includes(id));
       const state = this.health.getState();
       result.aborted = {
-        reason: 'circuit_breaker',
+        reason: fatalReason,
         consecutive_failures: state.consecutiveFailures,
         threshold: state.threshold,
         diagnostics_dir: state.lastDumpDir,
@@ -442,7 +473,7 @@ export class ProductCollectionService {
         completed_categories: completedCategories,
       };
       this.logger.error(
-        `[${siteId}] Sync aborted by circuit breaker. ` +
+        `[${siteId}] Sync aborted (${fatalReason}): ${fatalError.message}. ` +
           `${completedCategories.length}/${remaining.length} done. ` +
           `Resume with: POST /sync/resume/${siteId}`,
       );

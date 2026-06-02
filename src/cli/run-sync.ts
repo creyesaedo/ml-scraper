@@ -9,6 +9,21 @@ import { SyncRunnerService } from '../sync/sync-runner.service';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+// Process-level guards for this short-lived CLI. main() already wraps its own
+// steps in try/catch, but a rejection or throw escaping it (or a stray async
+// task) would otherwise exit 0 and make GitHub Actions report a green run for a
+// sync that actually failed. Log with context and exit non-zero so CI fails.
+function installProcessGuards(logger: Logger): void {
+  process.on('unhandledRejection', (reason) => {
+    logger.error('Unhandled promise rejection', reason instanceof Error ? reason.stack : reason);
+    process.exit(1);
+  });
+  process.on('uncaughtException', (err) => {
+    logger.error('Uncaught exception', err.stack ?? err.message);
+    process.exit(1);
+  });
+}
+
 // In DEVELOPMENT mode, after the random site is picked at config load, pick a
 // random parent category for that site from the DB and inject it as the
 // whitelist. Categories must already be synced; if not, we trigger the sync
@@ -164,4 +179,16 @@ async function main(): Promise<void> {
   process.exit(exitCode);
 }
 
-void main();
+const cliLogger = new Logger('SyncCLI');
+installProcessGuards(cliLogger);
+
+main().catch((err: unknown) => {
+  // main() exits the process itself on the paths it handles; this catches
+  // anything that throws before/around that (e.g. NestFactory failing to build
+  // the application context) so the CLI never exits 0 on an unhandled failure.
+  cliLogger.error(
+    'Sync CLI crashed before completing',
+    err instanceof Error ? err.stack : String(err),
+  );
+  process.exit(1);
+});

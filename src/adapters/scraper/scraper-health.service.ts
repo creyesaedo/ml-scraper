@@ -5,14 +5,39 @@ import * as path from 'path';
 import appConfig from '../../config/app.config';
 
 /**
+ * Base class for failures that must abort the whole sync run, not just the
+ * current category. They are non-recoverable within a run, so the collector
+ * stops launching new work and returns `aborted` (resumable later) instead of
+ * wasting time and Decodo credit on requests that will all fail the same way.
+ */
+export abstract class ScraperAbortError extends Error {}
+
+/**
  * Thrown when the circuit breaker has tripped. Callers should abort the sync
  * and let the orchestrator (ProductCollectionService / SyncRunnerService)
  * persist progress so the work can be resumed later.
  */
-export class CircuitBreakerOpenError extends Error {
+export class CircuitBreakerOpenError extends ScraperAbortError {
   constructor(message = 'Scraper circuit breaker is open') {
     super(message);
     this.name = 'CircuitBreakerOpenError';
+  }
+}
+
+/**
+ * Thrown when Decodo rejects a request for an account-level reason: out of
+ * balance / payment required (402), invalid or revoked token (401), or
+ * forbidden (403). Every later request would fail identically, so the run
+ * aborts on the first occurrence instead of grinding through the circuit-breaker
+ * threshold one slow failure at a time.
+ */
+export class DecodoAccountError extends ScraperAbortError {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'DecodoAccountError';
   }
 }
 
