@@ -3,9 +3,9 @@ import { MercadoLibreClient } from '../adapters/mercadolibre/mercadolibre.client
 import { PrismaService } from '../prisma/prisma.service';
 
 export interface CategorySyncResult {
-  paises_procesados: number;
-  categorias_guardadas: number;
-  errores?: string[];
+  countries_processed: number;
+  categories_saved: number;
+  errors?: string[];
 }
 
 /**
@@ -28,7 +28,7 @@ export class CategorySyncService {
    * For each site it fetches the root categories from the official API and
    * upserts them (insert if new, update the name if already present). Sites are
    * processed one after another, but the categories within a site are upserted
-   * in parallel. A failure on one site is logged and collected in `errores`; it
+   * in parallel. A failure on one site is logged and collected in `errors`; it
    * does not stop the remaining sites.
    */
   async sync(): Promise<CategorySyncResult> {
@@ -60,10 +60,10 @@ export class CategorySyncService {
     }
 
     const result: CategorySyncResult = {
-      paises_procesados: sites.length,
-      categorias_guardadas: totalSaved,
+      countries_processed: sites.length,
+      categories_saved: totalSaved,
     };
-    if (errors.length) result.errores = errors;
+    if (errors.length) result.errors = errors;
     return result;
   }
 }

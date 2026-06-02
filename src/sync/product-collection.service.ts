@@ -19,10 +19,10 @@ export type AbortReason = 'circuit_breaker' | 'decodo_account' | 'database';
 export interface CollectionResult {
   site_id: string;
   sync_run_id: string;
-  categorias_procesadas: number;
-  productos_guardados: number;
+  categories_processed: number;
+  products_saved: number;
   snapshot_date: string;
-  errores?: string[];
+  errors?: string[];
   aborted?: {
     reason: AbortReason;
     consecutive_failures: number;
@@ -203,7 +203,7 @@ export class ProductCollectionService {
    *      `aborted` with the pending/completed lists so the run can be resumed.
    *
    * Per-run caches and the circuit breaker are reset on entry. Individual
-   * category failures are collected in `errores` and never abort the whole run.
+   * category failures are collected in `errors` and never abort the whole run.
    */
   async collect(siteId: string, opts: CollectOptions = {}): Promise<CollectionResult> {
     this.leafCategoryCache.clear();
@@ -222,10 +222,10 @@ export class ProductCollectionService {
       return {
         site_id: siteId,
         sync_run_id: '',
-        categorias_procesadas: 0,
-        productos_guardados: 0,
+        categories_processed: 0,
+        products_saved: 0,
         snapshot_date: snapshotDate.toISOString(),
-        errores: [`No categories found for ${siteId}. Run POST /sync/categorias first.`],
+        errors: [`No categories found for ${siteId}. Run POST /sync/categories first.`],
       };
     }
 
@@ -271,10 +271,10 @@ export class ProductCollectionService {
       return {
         site_id: siteId,
         sync_run_id: '',
-        categorias_procesadas: 0,
-        productos_guardados: 0,
+        categories_processed: 0,
+        products_saved: 0,
         snapshot_date: snapshotDate.toISOString(),
-        errores: [`No categories matched filters for ${siteId}.`],
+        errors: [`No categories matched filters for ${siteId}.`],
       };
     }
 
@@ -315,7 +315,7 @@ export class ProductCollectionService {
               await this.scraper.scrapeCategoryWithProducts(siteId, rootCat.ml_id, 8);
 
             if (!scraped.length) {
-              errors.push(`${rootCat.ml_id}: sin resultados`);
+              errors.push(`${rootCat.ml_id}: no results`);
               await this.markCategoryDone(syncRunId, rootCat.ml_id);
               completedCategories.push(rootCat.ml_id);
               return;
@@ -448,11 +448,11 @@ export class ProductCollectionService {
     const result: CollectionResult = {
       site_id: siteId,
       sync_run_id: syncRunId,
-      categorias_procesadas: completedCategories.length,
-      productos_guardados: totalProducts,
+      categories_processed: completedCategories.length,
+      products_saved: totalProducts,
       snapshot_date: snapshotDate.toISOString(),
     };
-    if (errors.length) result.errores = errors;
+    if (errors.length) result.errors = errors;
 
     // Casts: TS does not track these let-variables being mutated inside the
     // Promise.all closures above, so after the loop it still believes they are

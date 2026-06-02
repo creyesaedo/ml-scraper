@@ -70,8 +70,8 @@ describe('ProductCollectionService', () => {
     const prisma = makePrisma();
     const { service } = makeService(prisma, makeConfig());
     const result = await service.collect('MLC');
-    expect(result.productos_guardados).toBe(0);
-    expect(result.errores![0]).toContain('No categories found');
+    expect(result.products_saved).toBe(0);
+    expect(result.errors![0]).toContain('No categories found');
   });
 
   it('aborts (throws) in DEVELOPMENT mode when no whitelist is set', async () => {
@@ -93,8 +93,8 @@ describe('ProductCollectionService', () => {
 
     const result = await service.collect('MLC');
 
-    expect(result.productos_guardados).toBe(1);
-    expect(result.categorias_procesadas).toBe(1);
+    expect(result.products_saved).toBe(1);
+    expect(result.categories_processed).toBe(1);
     expect(result.aborted).toBeUndefined();
     expect(prisma.product.createMany).toHaveBeenCalledTimes(1);
     const inserted = prisma.product.createMany.mock.calls[0][0].data;
@@ -131,7 +131,7 @@ describe('ProductCollectionService', () => {
     expect(result.aborted?.reason).toBe('database');
   });
 
-  it('records a category with no results in errores and marks it done', async () => {
+  it('records a category with no results in errors and marks it done', async () => {
     const prisma = makePrisma();
     prisma.category.findMany.mockResolvedValue([{ id: 1, ml_id: 'MLC1', name: 'A' }]);
     const { service, scraper } = makeService(prisma, makeConfig());
@@ -142,8 +142,8 @@ describe('ProductCollectionService', () => {
 
     const result = await service.collect('MLC');
 
-    expect(result.productos_guardados).toBe(0);
-    expect(result.categorias_procesadas).toBe(1);
-    expect(result.errores).toContain('MLC1: sin resultados');
+    expect(result.products_saved).toBe(0);
+    expect(result.categories_processed).toBe(1);
+    expect(result.errors).toContain('MLC1: no results');
   });
 });

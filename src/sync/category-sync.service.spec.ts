@@ -23,9 +23,9 @@ describe('CategorySyncService', () => {
 
     const result = await service.sync();
 
-    expect(result.paises_procesados).toBe(2);
-    expect(result.categorias_guardadas).toBe(3);
-    expect(result.errores).toBeUndefined();
+    expect(result.countries_processed).toBe(2);
+    expect(result.categories_saved).toBe(3);
+    expect(result.errors).toBeUndefined();
     expect(prisma.category.upsert).toHaveBeenCalledTimes(3);
     expect(prisma.category.upsert).toHaveBeenCalledWith({
       where: { ml_id: 'MLC1' },
@@ -34,7 +34,7 @@ describe('CategorySyncService', () => {
     });
   });
 
-  it('collects per-site failures in errores without stopping other sites', async () => {
+  it('collects per-site failures in errors without stopping other sites', async () => {
     const { service, prisma, mlClient } = makeService();
     mlClient.getSites.mockResolvedValue([
       { id: 'MLC', name: 'Chile' },
@@ -46,9 +46,9 @@ describe('CategorySyncService', () => {
 
     const result = await service.sync();
 
-    expect(result.categorias_guardadas).toBe(1);
-    expect(result.errores).toHaveLength(1);
-    expect(result.errores![0]).toContain('MLC');
+    expect(result.categories_saved).toBe(1);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors![0]).toContain('MLC');
     expect(prisma.category.upsert).toHaveBeenCalledTimes(1);
   });
 });

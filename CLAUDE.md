@@ -173,20 +173,20 @@ GET /health
 
 #### Read
 ```http
-GET /categorias
-GET /categorias?solo_padres=true     # only root categories
-GET /productos?category_id=<id>      # all snapshots for that category
+GET /categories
+GET /categories?parent_only=true     # only root categories
+GET /products?category_id=<id>       # paginated snapshots, filterable by category
 ```
 
 #### Manual sync (on-demand, for testing)
 ```http
 POST /sync/run/:siteId       # full sync: categories (if empty) + products
-POST /sync/categorias        # categories only — all ML sites (no siteId param)
-POST /sync/productos/:siteId # products only (categories must already exist)
+POST /sync/categories        # categories only — all ML sites (no siteId param)
+POST /sync/products/:siteId  # products only (categories must already exist)
 POST /sync/resume/:siteId    # continue the most recent unfinished sync_run for this site
 ```
 
-When a **run-level failure** aborts mid-run, `/sync/run` or `/sync/productos` returns 200 with `aborted` populated. `reason` is one of:
+When a **run-level failure** aborts mid-run, `/sync/run` or `/sync/products` returns 200 with `aborted` populated. `reason` is one of:
 
 | `reason` | Trigger | Recoverable? |
 |---|---|---|
@@ -200,8 +200,8 @@ All three stop launching new categories and checkpoint progress so the run is re
 {
   "site_id": "MLC",
   "sync_run_id": "MLC-2026-05-23T03-00-00-000Z",
-  "categorias_procesadas": 18,
-  "productos_guardados": 360,
+  "categories_processed": 18,
+  "products_saved": 360,
   "snapshot_date": "2026-05-23T03:00:00Z",
   "aborted": {
     "reason": "circuit_breaker",

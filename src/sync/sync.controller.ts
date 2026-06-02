@@ -16,13 +16,13 @@ export class SyncController {
     return this.syncRunnerService.run(siteId);
   }
 
-  @Post('categorias')
-  syncCategorias() {
+  @Post('categories')
+  syncCategories() {
     return this.categorySyncService.sync();
   }
 
-  @Post('productos/:siteId')
-  collectProductos(@Param('siteId') siteId: string) {
+  @Post('products/:siteId')
+  collectProducts(@Param('siteId') siteId: string) {
     return this.productCollectionService.collect(siteId);
   }
 
@@ -32,7 +32,7 @@ export class SyncController {
    * has aborted a run (see CollectionResult.aborted in the previous response).
    */
   @Post('resume/:siteId')
-  resumeProductos(@Param('siteId') siteId: string) {
+  resumeProducts(@Param('siteId') siteId: string) {
     return this.productCollectionService.collect(siteId, { resume: true });
   }
 }

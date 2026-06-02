@@ -27,7 +27,7 @@ export class SyncRunnerService {
    * info for the caller to inspect or log.
    */
   async run(siteId: string): Promise<object> {
-    let catResult: object | string = 'omitido (ya existían)';
+    let catResult: object | string = 'skipped (already existed)';
 
     try {
       const count = await this.prisma.category.count({ where: { country: siteId } });
@@ -51,8 +51,8 @@ export class SyncRunnerService {
     }
 
     return {
-      categorias_sincronizadas: catResult,
-      productos: prodResult,
+      categories_synced: catResult,
+      products: prodResult,
     };
   }
 }

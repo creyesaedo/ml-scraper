@@ -13,23 +13,6 @@ function makeService() {
 }
 
 describe('ProductsService', () => {
-  describe('findAll', () => {
-    it('passes no where clause when categoryId is undefined', async () => {
-      const { service, prisma } = makeService();
-      await service.findAll();
-      expect(prisma.product.findMany).toHaveBeenCalledWith({
-        where: undefined,
-        orderBy: [{ snapshot_date: 'desc' }, { id: 'asc' }],
-      });
-    });
-
-    it('filters by category when given', async () => {
-      const { service, prisma } = makeService();
-      await service.findAll(7);
-      expect(prisma.product.findMany.mock.calls[0][0].where).toEqual({ category_id: 7 });
-    });
-  });
-
   describe('findPaginated', () => {
     it('builds an AND filter, applies skip/take and computes total_pages', async () => {
       const { service, prisma } = makeService();

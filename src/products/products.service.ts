@@ -6,18 +6,6 @@ export class ProductsService {
   constructor(private readonly prisma: PrismaService) {}
 
   /**
-   * Returns all product snapshots, newest first, optionally filtered to one
-   * category. Backs the legacy /productos endpoint; unbounded, so it is meant
-   * for small/category-scoped reads rather than browsing the whole table.
-   */
-  async findAll(categoryId?: number) {
-    return this.prisma.product.findMany({
-      where: categoryId !== undefined ? { category_id: categoryId } : undefined,
-      orderBy: [{ snapshot_date: 'desc' }, { id: 'asc' }],
-    });
-  }
-
-  /**
    * Paginated product search backing the /products endpoint. All filters
    * (country, category, date range, name search) are optional and combined with
    * AND; only the columns the frontend needs are selected. Runs the page query

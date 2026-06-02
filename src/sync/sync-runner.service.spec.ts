@@ -12,26 +12,26 @@ describe('SyncRunnerService', () => {
   it('syncs categories first when the site has none, then collects products', async () => {
     const { service, prisma, categorySyncService, productCollectionService } = makeService();
     prisma.category.count.mockResolvedValue(0);
-    categorySyncService.sync.mockResolvedValue({ categorias_guardadas: 5 });
-    productCollectionService.collect.mockResolvedValue({ productos_guardados: 10 });
+    categorySyncService.sync.mockResolvedValue({ categories_saved: 5 });
+    productCollectionService.collect.mockResolvedValue({ products_saved: 10 });
 
     const result: any = await service.run('MLC');
 
     expect(categorySyncService.sync).toHaveBeenCalledTimes(1);
     expect(productCollectionService.collect).toHaveBeenCalledWith('MLC');
-    expect(result.categorias_sincronizadas).toEqual({ categorias_guardadas: 5 });
-    expect(result.productos).toEqual({ productos_guardados: 10 });
+    expect(result.categories_synced).toEqual({ categories_saved: 5 });
+    expect(result.products).toEqual({ products_saved: 10 });
   });
 
   it('skips category sync when categories already exist', async () => {
     const { service, prisma, categorySyncService, productCollectionService } = makeService();
     prisma.category.count.mockResolvedValue(42);
-    productCollectionService.collect.mockResolvedValue({ productos_guardados: 3 });
+    productCollectionService.collect.mockResolvedValue({ products_saved: 3 });
 
     const result: any = await service.run('MLC');
 
     expect(categorySyncService.sync).not.toHaveBeenCalled();
-    expect(result.categorias_sincronizadas).toBe('omitido (ya existían)');
+    expect(result.categories_synced).toBe('skipped (already existed)');
   });
 
   it('captures a product-collection failure as a structured error', async () => {
@@ -41,18 +41,18 @@ describe('SyncRunnerService', () => {
 
     const result: any = await service.run('MLC');
 
-    expect(result.productos).toEqual({ error: 'collect blew up' });
+    expect(result.products).toEqual({ error: 'collect blew up' });
   });
 
   it('captures a category-sync failure but still runs collection', async () => {
     const { service, prisma, categorySyncService, productCollectionService } = makeService();
     prisma.category.count.mockResolvedValue(0);
     categorySyncService.sync.mockRejectedValue(new Error('cat fail'));
-    productCollectionService.collect.mockResolvedValue({ productos_guardados: 0 });
+    productCollectionService.collect.mockResolvedValue({ products_saved: 0 });
 
     const result: any = await service.run('MLC');
 
-    expect(result.categorias_sincronizadas).toEqual({ error: 'cat fail' });
+    expect(result.categories_synced).toEqual({ error: 'cat fail' });
     expect(productCollectionService.collect).toHaveBeenCalled();
   });
 });

@@ -158,13 +158,13 @@ async function main(): Promise<void> {
     const start = Date.now();
     try {
       const result = (await runner.run(siteId)) as {
-        productos?: { aborted?: unknown; productos_guardados?: number };
+        products?: { aborted?: unknown; products_saved?: number };
       };
       const elapsed = ((Date.now() - start) / 1000).toFixed(1);
-      const saved = result.productos?.productos_guardados ?? 0;
+      const saved = result.products?.products_saved ?? 0;
       logger.log(`[${siteId}] done in ${elapsed}s — ${saved} products saved`);
       logger.log(`[${siteId}] result: ${JSON.stringify(result)}`);
-      if (result.productos?.aborted) {
+      if (result.products?.aborted) {
         logger.error(`[${siteId}] circuit breaker tripped — see diagnostics dir`);
         exitCode = 1;
       }

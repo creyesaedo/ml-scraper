@@ -178,8 +178,8 @@ TRIGGER  GitHub Actions cron  |  CLI (npm run sync:run)  |  HTTP POST /sync/run/
 
 ```http
 POST /sync/run/:siteId         # Full cycle: categories (if empty) + products
-POST /sync/categorias          # Categories only — all ML sites
-POST /sync/productos/:siteId   # Products only (categories must already exist)
+POST /sync/categories          # Categories only — all ML sites
+POST /sync/products/:siteId    # Products only (categories must already exist)
 POST /sync/resume/:siteId      # Resume the most recent aborted sync_run
 ```
 
@@ -189,8 +189,8 @@ A full `PRODUCTION` sync takes ~13 min per site (≈100 min for Core 8). Prefer 
 
 ```http
 GET /health                          # → { status: 'ok' }
-GET /categorias?solo_padres=true     # All root categories
-GET /productos?category_id=<id>      # Latest product snapshots for a category
+GET /categories?parent_only=true     # All root categories
+GET /products?category_id=<id>       # Paginated product snapshots, filterable by category
 ```
 
 ## Project layout
