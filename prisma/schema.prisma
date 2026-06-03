@@ -54,6 +54,11 @@ model Product {
   listing_type_id  String?  @db.VarChar(20)
   is_cbt           Boolean  @default(false)
 
+  currency           String?  @db.VarChar(3)
+  exchange_rate      Decimal? @db.Decimal(18, 8)
+  usd_price          Decimal? @db.Decimal(14, 2)
+  usd_original_price Decimal? @db.Decimal(14, 2)
+
   category        Category @relation("ProductCategory", fields: [category_id], references: [id])
   parent_category Category? @relation("ProductParentCategory", fields: [parent_id], references: [id])
   seller          Seller?   @relation(fields: [seller_id], references: [id])

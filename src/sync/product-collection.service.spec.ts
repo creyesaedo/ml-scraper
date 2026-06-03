@@ -37,6 +37,7 @@ function makeService(prisma: any, configService: any) {
   const scraper = { scrapeCategoryWithProducts: jest.fn() } as any;
   const mlClient = { getCatalogProduct: jest.fn(), getCategory: jest.fn() } as any;
   const holidays = { getHolidayName: jest.fn().mockResolvedValue(null) } as any;
+  const exchangeRates = { getRate: jest.fn().mockResolvedValue(950) } as any;
   const health = {
     reset: jest.fn(),
     getState: jest.fn(() => ({
@@ -51,10 +52,11 @@ function makeService(prisma: any, configService: any) {
     scraper,
     mlClient,
     holidays,
+    exchangeRates,
     configService,
     health,
   );
-  return { service, scraper, mlClient, holidays, health };
+  return { service, scraper, mlClient, holidays, exchangeRates, health };
 }
 
 const product = {
@@ -98,7 +100,15 @@ describe('ProductCollectionService', () => {
     expect(result.aborted).toBeUndefined();
     expect(prisma.product.createMany).toHaveBeenCalledTimes(1);
     const inserted = prisma.product.createMany.mock.calls[0][0].data;
-    expect(inserted[0]).toMatchObject({ name: 'P1', price: '1000', category_id: 1, parent_id: null });
+    expect(inserted[0]).toMatchObject({
+      name: 'P1',
+      price: '1000',
+      category_id: 1,
+      parent_id: null,
+      currency: 'CLP',
+      exchange_rate: 950,
+      usd_price: 1.05, // 1000 / 950, rounded to 2dp
+    });
   });
 
   it('aborts with reason decodo_account when the scraper throws DecodoAccountError', async () => {

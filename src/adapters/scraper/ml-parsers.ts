@@ -67,6 +67,26 @@ export const SITE_DOMAINS: Record<string, string> = {
   MLE: 'mercadolibre.com.ec',
 };
 
+// ISO 4217 currency code per MercadoLibre site. Used to convert the local
+// price to USD at scrape time. MLE (Ecuador) already trades in USD.
+export const SITE_CURRENCIES: Record<string, string> = {
+  MLA: 'ARS', // Argentina
+  MLB: 'BRL', // Brazil
+  MLM: 'MXN', // Mexico
+  MLC: 'CLP', // Chile
+  MCO: 'COP', // Colombia
+  MLU: 'UYU', // Uruguay
+  MPE: 'PEN', // Peru
+  MLV: 'VES', // Venezuela
+  MLD: 'DOP', // Dominican Republic
+  MLE: 'USD', // Ecuador — already USD
+};
+
+/** Returns the ISO 4217 currency for a site, or null when the site is unknown. */
+export function currencyForSite(siteId: string): string | null {
+  return SITE_CURRENCIES[siteId] ?? null;
+}
+
 // 2-letter geo code used by Decodo's `geo` parameter, derived from siteId.
 export const SITE_GEO: Record<string, string> = {
   MLA: 'ar',

@@ -107,6 +107,17 @@ Categorías de MercadoLibre. Las raíces vienen del endpoint oficial `/sites/{si
 | `listing_type_id` | `varchar(20)` | SÍ | Tier de publicación contratado: `"gold_pro"` (Premium, máx exposición + cuotas), `"gold_special"` (Clásica), `"gold"`, `"free"`. | Proxy de inversión publicitaria del vendedor. Permite estimar cuánto "paga" un seller para mantenerse en el top y modelar barreras de entrada por categoría. |
 | `is_cbt` | `boolean` | NO (default `false`) | `true` si el listing ganador es **cross-border / internacional** (CBT). Detectado por bloque `cbt_summary` o icono `cbt_fsbar_airplane`. | Mide penetración de importadores vs locales en el top. Crítico para verticales (electrónica, fashion) donde el CBT redefine la competencia local. |
 
+### Campos de conversión a dólares (FX)
+
+Calculados al momento del snapshot con la tasa USD del día (API `open.er-api.com`). La tasa se resuelve **una vez por corrida y por sitio** (cada sitio tiene una sola moneda) y se aplica a todas las filas de esa corrida. Si la API de tasas falla, `currency` igual se guarda pero `exchange_rate` / `usd_price` / `usd_original_price` quedan en NULL y el sync continúa (fallo suave — no aborta).
+
+| Columna | Tipo | Null | Qué representa | Valor para análisis |
+|---|---|---|---|---|
+| `currency` | `varchar(3)` | SÍ | Código ISO 4217 de la **moneda local** del site (`"CLP"`, `"ARS"`, `"BRL"`, ... `"USD"` para Ecuador). Derivado del siteId vía `SITE_CURRENCIES`. NULL si el site no está mapeado. | Hace cada snapshot autoexplicativo: `country` guarda el siteId, no la moneda. Sin esto, un `price` crudo no se sabe en qué divisa está. Indispensable para comparar/convertir entre países. |
+| `exchange_rate` | `decimal(18, 8)` | SÍ | Tasa exacta usada en el snapshot: **unidades locales por 1 USD** (ej. `950.50000000` = 1 USD vale 950.5 CLP). NULL si no se pudo obtener. | Como los snapshots son inmutables, guardar la tasa hace la conversión **reproducible y auditable**: permite recalcular o corregir los valores USD sin re-scrapear, y analizar la evolución del tipo de cambio. |
+| `usd_price` | `decimal(14, 2)` | SÍ | `price` convertido a dólares (`price / exchange_rate`). Para Ecuador (tasa 1) `usd_price === price`. NULL si no hubo tasa. | Objetivo principal: permite comparar precios de productos entre los 10 países en una unidad común, sin que distorsionen las diferencias de moneda. |
+| `usd_original_price` | `decimal(14, 2)` | SÍ | `original_price` (precio antes del descuento) convertido a dólares con la misma tasa. NULL cuando no hay descuento o no hubo tasa. | Complementa a `usd_price`: permite medir el descuento absoluto en USD y comparar la profundidad de ofertas entre países en una misma unidad. |
+
 **Índices:**
 - `category_id`, `parent_id` — joins con categories.
 - `snapshot_date` — filtrar por fecha del snapshot.

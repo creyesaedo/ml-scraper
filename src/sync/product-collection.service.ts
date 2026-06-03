@@ -1,9 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import pLimit from 'p-limit';
+import { ExchangeRateClient } from '../adapters/exchange/exchange-rate.client';
 import { HolidaysClient } from '../adapters/holidays/holidays.client';
 import { MercadoLibreClient } from '../adapters/mercadolibre/mercadolibre.client';
-import { EMPTY_ENRICHMENT } from '../adapters/scraper/ml-parsers';
+import { currencyForSite, EMPTY_ENRICHMENT } from '../adapters/scraper/ml-parsers';
 import { MlScraperService } from '../adapters/scraper/ml-scraper.service';
 import {
   DecodoAccountError,
@@ -39,6 +40,19 @@ export interface CollectOptions {
 }
 
 /**
+ * Converts a local-currency amount to USD given the rate (local units per 1
+ * USD), rounded to 2 decimals. Returns null when the amount or rate is missing
+ * or unusable, so a missing FX rate simply leaves the USD column null.
+ */
+function toUsd(local: number | null, rate: number | null): number | null {
+  if (local == null || rate == null || !Number.isFinite(local) || rate <= 0) {
+    return null;
+  }
+  const usd = local / rate;
+  return Number.isFinite(usd) ? Math.round(usd * 100) / 100 : null;
+}
+
+/**
  * The expensive half of a sync: scrapes best-seller products for a site's
  * categories, enriches them (ML API + product-page data + leaf category +
  * seller), and stores immutable snapshot rows. Progress is checkpointed per
@@ -59,6 +73,7 @@ export class ProductCollectionService {
     private readonly scraper: MlScraperService,
     private readonly mlClient: MercadoLibreClient,
     private readonly holidays: HolidaysClient,
+    private readonly exchangeRates: ExchangeRateClient,
     private readonly configService: ConfigService,
     private readonly health: ScraperHealthService,
   ) {}
@@ -294,6 +309,21 @@ export class ProductCollectionService {
     const categoryLimit = pLimit(3);
     const productLimit = pLimit(8);
     const holidayName = await this.holidays.getHolidayName(snapshotDate, siteId);
+
+    // Resolve the FX rate once per run (collect() is per-site = one currency).
+    // The rate is cached per day inside the client, so a multi-site run still
+    // makes a single network call. A null rate (unknown site or fetch failure)
+    // leaves the USD columns null and never aborts the run.
+    const currency = currencyForSite(siteId);
+    const exchangeRate = currency
+      ? await this.exchangeRates.getRate(currency, snapshotDate)
+      : null;
+    if (currency && exchangeRate == null) {
+      this.logger.warn(
+        `[${siteId}] No FX rate for ${currency}; usd_price will be null for this run`,
+      );
+    }
+
     let totalProducts = 0;
     const errors: string[] = [];
     const completedCategories: string[] = [];
@@ -410,6 +440,10 @@ export class ProductCollectionService {
                 shipping_type: p.shipping_type,
                 listing_type_id: p.listing_type_id,
                 is_cbt: p.is_cbt,
+                currency,
+                exchange_rate: exchangeRate,
+                usd_price: toUsd(Number(p.price), exchangeRate),
+                usd_original_price: toUsd(p.original_price, exchangeRate),
               })),
             });
 

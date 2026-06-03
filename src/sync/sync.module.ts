@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { ExchangeModule } from '../adapters/exchange/exchange.module';
 import { HolidaysModule } from '../adapters/holidays/holidays.module';
 import { MercadoLibreModule } from '../adapters/mercadolibre/mercadolibre.module';
 import { ScraperModule } from '../adapters/scraper/scraper.module';
@@ -8,7 +9,7 @@ import { SyncController } from './sync.controller';
 import { SyncRunnerService } from './sync-runner.service';
 
 @Module({
-  imports: [MercadoLibreModule, ScraperModule, HolidaysModule],
+  imports: [MercadoLibreModule, ScraperModule, HolidaysModule, ExchangeModule],
   controllers: [SyncController],
   providers: [SyncRunnerService, CategorySyncService, ProductCollectionService],
   exports: [SyncRunnerService],
