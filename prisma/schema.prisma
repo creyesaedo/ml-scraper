@@ -59,6 +59,11 @@ model Product {
   usd_price          Decimal? @db.Decimal(14, 2)
   usd_original_price Decimal? @db.Decimal(14, 2)
 
+  available_quantity         Int?
+  installments_quantity      Int?
+  installments_amount        Decimal? @db.Decimal(14, 2)
+  installments_interest_free Boolean?
+
   category        Category @relation("ProductCategory", fields: [category_id], references: [id])
   parent_category Category? @relation("ProductParentCategory", fields: [parent_id], references: [id])
   seller          Seller?   @relation(fields: [seller_id], references: [id])

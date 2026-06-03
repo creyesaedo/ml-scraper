@@ -139,6 +139,8 @@ describe('ml-parsers', () => {
       '"icon_id":"vpp_full_icon"',
       '"listing_type_id":"gold_pro"',
       '"cbt_summary":{}',
+      '"quantity_selector":{"available_quantity":6,"minimum_quantity":1}',
+      '"installments_value_each":1946,"installments_amount":12,"is_free_installments":true',
       '"seller_id":12345',
       '"nickname":"TIENDA_OFICIAL"',
       '"official_store_id":7',
@@ -167,6 +169,11 @@ describe('ml-parsers', () => {
       expect(e.shipping_type).toBe('full'));
     it('extracts listing type id', () => expect(e.listing_type_id).toBe('gold_pro'));
     it('flags cross-border listings', () => expect(e.is_cbt).toBe(true));
+    it('extracts available quantity (stock)', () => expect(e.available_quantity).toBe(6));
+    it('extracts installments count', () => expect(e.installments_quantity).toBe(12));
+    it('extracts the per-installment amount', () => expect(e.installments_amount).toBe(1946));
+    it('extracts the interest-free flag', () =>
+      expect(e.installments_interest_free).toBe(true));
 
     it('extracts the seller block', () => {
       expect(e.seller_ml_id).toBe('12345');
@@ -175,6 +182,45 @@ describe('ml-parsers', () => {
       expect(e.seller_power_status).toBe('platinum');
       expect(e.seller_total_products).toBe(100);
       expect(e.seller_total_sales).toBe(5000);
+    });
+  });
+
+  describe('parseProductPageHtml — Portuguese (Brazil) variants', () => {
+    it('parses "vendidos" with the Portuguese million word "milhões"', () => {
+      expect(parseProductPageHtml('+2 milhões vendidos').sold_count).toBe(2_000_000);
+    });
+
+    it('parses "mil vendidos" the same in pt (matches MLB live: 250 mil)', () => {
+      expect(parseProductPageHtml('+250 mil vendidos').sold_count).toBe(250_000);
+    });
+
+    it('extracts seller sales from the Portuguese word "vendas"', () => {
+      expect(parseProductPageHtml('+100 mil vendas').seller_total_sales).toBe(100_000);
+    });
+
+    it('extracts seller products from the Portuguese word "produtos"', () => {
+      expect(parseProductPageHtml('+50 produtos').seller_total_products).toBe(50);
+    });
+
+    it('detects free shipping from the Portuguese "Frete grátis"', () => {
+      const e = parseProductPageHtml('"shipping":{"text":"Frete grátis","values":[]}');
+      expect(e.shipping_type).toBe('free');
+    });
+
+    it('detects an official store from the Portuguese "Loja oficial"', () => {
+      expect(parseProductPageHtml('algo Loja oficial algo').seller_is_official_store).toBe(true);
+    });
+  });
+
+  describe('parseProductPageHtml — Spanish million/sales still work', () => {
+    it('parses "millones" vendidos', () => {
+      expect(parseProductPageHtml('+3 millones vendidos').sold_count).toBe(3_000_000);
+    });
+    it('parses "ventas" with magnitude', () => {
+      expect(parseProductPageHtml('+5 mil ventas').seller_total_sales).toBe(5_000);
+    });
+    it('parses "productos"', () => {
+      expect(parseProductPageHtml('+100 productos').seller_total_products).toBe(100);
     });
   });
 

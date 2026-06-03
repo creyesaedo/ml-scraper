@@ -269,6 +269,8 @@ HTTP-only — no headless browser runs in our container. For each URL (category 
 - `categoryUrl(siteId, categoryMlId)` — builds the best-sellers URL using `SITE_DOMAINS` + `SITE_BESTSELLER_SLUG` (`/mas-vendidos/{id}` for Spanish sites, `/mais-vendidos/{id}` for Brazil).
 - `SITE_GEO` — 2-letter geo codes for Decodo's `geo` param (`MLC → cl`, etc.).
 
+**Language support (es + pt).** Most fields are read from language-agnostic inline JSON keys (`reviews`, `discount`, `installments_*`, `available_quantity`, `nickname`, etc.), so they work unchanged across all sites. The few **text-based** patterns are bilingual: `sold_count`/`seller_total_sales` accept es "mil/millón/millones" **and** pt "mil/milhão/milhões" (shared `MAGNITUDE` sub-pattern + `parseMagnitudeCount`); `seller_total_sales` matches "ventas"/"vendas"; `seller_total_products` matches "producto(s)"/"produto(s)" (`produc?tos?`); free shipping matches "Envío gratis"/"Frete grátis"; official-store fallback matches "Tienda oficial"/"Loja oficial". Verified live across the 7 scraped sites (Core 8 minus MLV) — only Brazil (MLB) is Portuguese; all 6 Spanish sites (AR/CL/MX/CO/PE/UY) share identical text. Re-validate with `node scripts/test-langs.js` after ML markup changes.
+
 **3. Per-product enrichment via ML API.**
 For each product with a `catalog_id`, `MercadoLibreClient.getCatalogProduct()` calls `GET /products/{catalog_id}` with a `client_credentials` OAuth2 token. Returns `date_created`. Runs in parallel with the page scraping via `pLimit(8)`.
 

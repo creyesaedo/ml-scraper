@@ -118,6 +118,17 @@ Calculados al momento del snapshot con la tasa USD del día (API `open.er-api.co
 | `usd_price` | `decimal(14, 2)` | SÍ | `price` convertido a dólares (`price / exchange_rate`). Para Ecuador (tasa 1) `usd_price === price`. NULL si no hubo tasa. | Objetivo principal: permite comparar precios de productos entre los 10 países en una unidad común, sin que distorsionen las diferencias de moneda. |
 | `usd_original_price` | `decimal(14, 2)` | SÍ | `original_price` (precio antes del descuento) convertido a dólares con la misma tasa. NULL cuando no hay descuento o no hubo tasa. | Complementa a `usd_price`: permite medir el descuento absoluto en USD y comparar la profundidad de ofertas entre países en una misma unidad. |
 
+### Campos de stock y financiamiento (HTML del PDP)
+
+Parseados del mismo JSON inline del PDP que el resto del enriquecimiento (costo $0 extra de Decodo). Todos nullable: un producto se guarda igual aunque el bloque no aparezca.
+
+| Columna | Tipo | Null | Qué representa | Valor para análisis |
+|---|---|---|---|---|
+| `available_quantity` | `int` | SÍ | Stock declarado por el vendedor (`available_quantity` del selector de cantidad). ML **topea** el valor que muestra en el dropdown, así que en listings con mucho stock es un **piso**, no el inventario exacto. | Mejor proxy de **escasez/demanda** disponible. Cruzado con `sold_count` entre snapshots estima la velocidad de venta real (si el stock baja semana a semana, se está vendiendo). |
+| `installments_quantity` | `int` | SÍ | Número de cuotas del financiamiento ofrecido (`installments_amount` en ML, ej. `12`). NULL si la publicación no ofrece cuotas. | El financiamiento en cuotas es una palanca de precio central en LatAm. Permite analizar agresividad de financiamiento por categoría/vendedor más allá del precio nominal. |
+| `installments_amount` | `decimal(14, 2)` | SÍ | Monto **por cuota** en moneda local (`installments_value_each`, ej. `1946`). NULL sin cuotas. | Junto con `installments_quantity` reconstruye la oferta "12x $1.946": dos productos al mismo `price` no son equivalentes para el comprador si difieren las cuotas. |
+| `installments_interest_free` | `boolean` | SÍ | `true` si las cuotas son **sin interés** (`is_free_installments`), `false` si tienen recargo. **NULL** si no hay cuotas (distinto de "con interés"). | "Sin interés" reduce el costo financiero efectivo a cero — diferenciador competitivo fuerte. El NULL vs false separa "no aplica" de "con interés", clave para no sesgar el análisis. |
+
 **Índices:**
 - `category_id`, `parent_id` — joins con categories.
 - `snapshot_date` — filtrar por fecha del snapshot.

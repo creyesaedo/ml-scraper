@@ -1,5 +1,26 @@
 import * as cheerio from 'cheerio';
 
+// Magnitude word shared by "vendidos"/"ventas"/"vendas" badges, covering both
+// Spanish ("mil", "millón", "millones") and Portuguese ("mil", "milhão",
+// "milhões"). Used as a sub-pattern inside larger regexes (no flags/anchors).
+const MAGNITUDE = '(mil(?:l[oó]n(?:es)?|h[ãa]o|h[õo]es)?)?';
+
+/**
+ * Parses an abbreviated count badge into a plain integer, supporting both
+ * Spanish and Portuguese magnitude words: "1.234", "5 mil", "2 millones" (es),
+ * "2 milhões" (pt). `numRaw` is the leading number — ML uses "." as the
+ * thousands separator and "," as the decimal — and `suffix` is the captured
+ * magnitude word (may be undefined). Returns null when the number is unparseable.
+ */
+function parseMagnitudeCount(numRaw: string, suffix: string | undefined): number | null {
+  const base = parseFloat(numRaw.replace(/\./g, '').replace(',', '.'));
+  if (!Number.isFinite(base)) return null;
+  const s = (suffix ?? '').toLowerCase();
+  if (/^mil[lh]/.test(s)) return Math.round(base * 1_000_000); // millón/millones/milhão/milhões
+  if (/^mil/.test(s)) return Math.round(base * 1_000); // mil (thousand, both languages)
+  return Math.round(base);
+}
+
 export interface ScrapedProduct {
   name: string;
   price: string;
@@ -24,6 +45,10 @@ export interface ProductEnrichment {
   shipping_type: ShippingType | null;
   listing_type_id: string | null;
   is_cbt: boolean;
+  available_quantity: number | null;
+  installments_quantity: number | null;
+  installments_amount: number | null;
+  installments_interest_free: boolean | null;
   seller_ml_id: string | null;
   seller_nickname: string | null;
   seller_is_official_store: boolean;
@@ -46,6 +71,10 @@ export const EMPTY_ENRICHMENT: ProductEnrichment = {
   shipping_type: null,
   listing_type_id: null,
   is_cbt: false,
+  available_quantity: null,
+  installments_quantity: null,
+  installments_amount: null,
+  installments_interest_free: null,
   seller_ml_id: null,
   seller_nickname: null,
   seller_is_official_store: false,
@@ -187,15 +216,11 @@ export function parseCategoryHtml(html: string): ScrapedProduct[] {
  * throws; missing data simply produces a sparser ProductEnrichment.
  */
 export function parseProductPageHtml(html: string): ProductEnrichment {
+  // "vendidos" is identical in es and pt; only the magnitude word differs
+  // (es "mil/millón/millones", pt "mil/milhão/milhões"), handled by MAGNITUDE.
   let sold_count: number | null = null;
-  const soldMatch = html.match(/\+([\d.,]+)\s*(mil(?:l[oó]n)?)?\s*vendidos/i);
-  if (soldMatch) {
-    const raw = parseFloat(soldMatch[1].replace(/\./g, '').replace(',', '.'));
-    const suffix = (soldMatch[2] ?? '').toLowerCase();
-    if (suffix.startsWith('mill')) sold_count = Math.round(raw * 1_000_000);
-    else if (suffix === 'mil') sold_count = Math.round(raw * 1_000);
-    else sold_count = Math.round(raw);
-  }
+  const soldMatch = html.match(new RegExp(`\\+([\\d.,]+)\\s*${MAGNITUDE}?\\s*vendidos`, 'i'));
+  if (soldMatch) sold_count = parseMagnitudeCount(soldMatch[1], soldMatch[2]);
 
   let rating: number | null = null;
   let review_count: number | null = null;
@@ -260,7 +285,10 @@ export function parseProductPageHtml(html: string): ProductEnrichment {
     shipping_type = 'full';
   } else if (/cbt_fsbar_airplane|"icon_id"\s*:\s*"cbt[^"]*"/.test(html)) {
     shipping_type = 'cross_border';
-  } else if (/"shipping"\s*:\s*\{[^{}]*"text"\s*:\s*"Env[ií]o gratis"/.test(html)) {
+  } else if (
+    /"shipping"\s*:\s*\{[^{}]*"text"\s*:\s*"(?:Env[ií]o gratis|Frete gr[áa]tis)"/.test(html)
+  ) {
+    // es "Envío gratis" / pt "Frete grátis".
     shipping_type = 'free';
   } else if (/"shipping"\s*:\s*\{[^{}]*"text"\s*:/.test(html)) {
     shipping_type = 'standard';
@@ -274,6 +302,40 @@ export function parseProductPageHtml(html: string): ProductEnrichment {
   // Cross-border (international) listing. ML renders the cbt_summary block
   // and/or the airplane icon only when the winning offer is international.
   const is_cbt = /"cbt_summary"|cbt_fsbar_airplane/.test(html);
+
+  // Seller-declared stock. ML exposes it in the quantity selector as
+  // "available_quantity":N (the component-list entries that share the name are
+  // objects/strings, so requiring a digit isolates the numeric value). ML caps
+  // the dropdown display, so this is a floor for high-stock listings.
+  let available_quantity: number | null = null;
+  const stockMatch = html.match(/"available_quantity"\s*:\s*(\d+)/);
+  if (stockMatch) {
+    const n = parseInt(stockMatch[1], 10);
+    if (Number.isFinite(n)) available_quantity = n;
+  }
+
+  // Installments (financing). ML's pricing block exposes the count as
+  // "installments_amount", the per-payment value as "installments_value_each",
+  // and the interest-free flag as "is_free_installments".
+  let installments_quantity: number | null = null;
+  const instCountMatch = html.match(/"installments_amount"\s*:\s*(\d+)/);
+  if (instCountMatch) {
+    const n = parseInt(instCountMatch[1], 10);
+    if (Number.isFinite(n) && n > 0) installments_quantity = n;
+  }
+
+  let installments_amount: number | null = null;
+  const instValueMatch = html.match(/"installments_value_each"\s*:\s*([\d.]+)/);
+  if (instValueMatch) {
+    const n = parseFloat(instValueMatch[1]);
+    if (Number.isFinite(n) && n > 0) installments_amount = n;
+  }
+
+  // Nullable on purpose: "unknown" (no installments block) must stay distinct
+  // from "has installments, with interest".
+  let installments_interest_free: boolean | null = null;
+  const interestMatch = html.match(/"is_free_installments"\s*:\s*(true|false)/);
+  if (interestMatch) installments_interest_free = interestMatch[1] === 'true';
 
   const seller = parseSellerFromHtml(html);
 
@@ -291,6 +353,10 @@ export function parseProductPageHtml(html: string): ProductEnrichment {
     shipping_type,
     listing_type_id,
     is_cbt,
+    available_quantity,
+    installments_quantity,
+    installments_amount,
+    installments_interest_free,
     ...seller,
   };
 }
@@ -345,7 +411,7 @@ function parseSellerFromHtml(html: string): {
   let seller_is_official_store = false;
   const officialIdMatch = html.match(/"official_store_id"\s*:\s*(\d+)/);
   if (officialIdMatch) seller_is_official_store = true;
-  else if (/Tienda oficial/i.test(html)) seller_is_official_store = true;
+  else if (/Tienda oficial|Loja oficial/i.test(html)) seller_is_official_store = true; // es / pt
 
   let seller_power_status: string | null = null;
   const powerJsonMatch = html.match(/"power_seller_status"\s*:\s*"([^"]+)"/);
@@ -357,24 +423,18 @@ function parseSellerFromHtml(html: string): {
     else if (/MercadoL[ií]der/i.test(html)) seller_power_status = 'mercadolider';
   }
 
+  // es "producto(s)" / pt "produto(s)" — the optional "c" covers both.
   let seller_total_products: number | null = null;
-  const productsMatch = html.match(/\+?\s*([\d.,]+)\s*([Pp]roductos?)/);
+  const productsMatch = html.match(/\+?\s*([\d.,]+)\s*produc?tos?\b/i);
   if (productsMatch) {
     const n = parseFloat(productsMatch[1].replace(/\./g, '').replace(',', '.'));
     if (Number.isFinite(n)) seller_total_products = Math.round(n);
   }
 
+  // es "ventas" / pt "vendas", each optionally prefixed by a magnitude word.
   let seller_total_sales: number | null = null;
-  const salesMatch = html.match(/\+?\s*([\d.,]+)\s*(mil(?:l[oó]n)?)?\s*[Vv]entas/);
-  if (salesMatch) {
-    const raw = parseFloat(salesMatch[1].replace(/\./g, '').replace(',', '.'));
-    const suffix = (salesMatch[2] ?? '').toLowerCase();
-    if (Number.isFinite(raw)) {
-      if (suffix.startsWith('mill')) seller_total_sales = Math.round(raw * 1_000_000);
-      else if (suffix === 'mil') seller_total_sales = Math.round(raw * 1_000);
-      else seller_total_sales = Math.round(raw);
-    }
-  }
+  const salesMatch = html.match(new RegExp(`\\+?\\s*([\\d.,]+)\\s*${MAGNITUDE}?\\s*(?:ventas?|vendas?)`, 'i'));
+  if (salesMatch) seller_total_sales = parseMagnitudeCount(salesMatch[1], salesMatch[2]);
 
   return {
     seller_ml_id,

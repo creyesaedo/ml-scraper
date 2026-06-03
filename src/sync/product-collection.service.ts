@@ -444,6 +444,10 @@ export class ProductCollectionService {
                 exchange_rate: exchangeRate,
                 usd_price: toUsd(Number(p.price), exchangeRate),
                 usd_original_price: toUsd(p.original_price, exchangeRate),
+                available_quantity: p.available_quantity,
+                installments_quantity: p.installments_quantity,
+                installments_amount: p.installments_amount,
+                installments_interest_free: p.installments_interest_free,
               })),
             });
 
