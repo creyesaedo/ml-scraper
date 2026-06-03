@@ -28,8 +28,8 @@ A circuit breaker aborts the run after too many consecutive scraper failures, du
 - **Single platform:** MercadoLibre only (ML-specific selectors, API endpoints, domains).
 - **`APP_MODE`** is the single switch for what gets scraped:
   - `DEVELOPMENT` (default) — one random site + one random parent category (~$0.03/run).
-  - `PRODUCTION` — Core 8 LatAm (`MLA MLB MLC MLM MCO MPE MLU MLV`), all parent categories (~$8/run, ≈100 min).
-- ML has 19 sites / 484 parent categories total; Core 8 covers 251 of them. Costs ≈ $34/mo at the Decodo $19 tier.
+  - `PRODUCTION` — Core 7 LatAm (`MLA MLB MLC MLM MCO MPE MLU`), all parent categories (~$7/run, ≈90 min).
+- ML has 19 sites / 484 parent categories total; the Core 7 cover ~225 of them. Costs ≈ $30/mo at the Decodo $19 tier. Venezuela (MLV) and Dominican Republic (MLD) are excluded — reduced/classifieds-only markets with no best-sellers section.
 
 ## Usage
 

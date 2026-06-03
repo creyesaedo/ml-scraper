@@ -57,7 +57,7 @@ A single env var controls which sites and categories the sync targets:
 | `APP_MODE` | Sites scraped | Categories per site | Decodo cost / run |
 |---|---|---|---|
 | `DEVELOPMENT` (default) | `MLC` only | `MLC1648` only (Electrónica Chile) | ~$0.03 (≤21 requests: 1 category + up to 20 products) |
-| `PRODUCTION` | Core 8: `MLA,MLB,MLC,MLM,MCO,MPE,MLU,MLV` | All parent categories per site | ~$8 (5,270 requests) |
+| `PRODUCTION` | Core 7: `MLA,MLB,MLC,MLM,MCO,MPE,MLU` | All parent categories per site | ~$7 (~4,700 requests) |
 
 Any other value (including blank) falls back to `DEVELOPMENT` for safety — prevents accidental production spend when the var is mis-typed.
 
@@ -269,7 +269,7 @@ HTTP-only — no headless browser runs in our container. For each URL (category 
 - `categoryUrl(siteId, categoryMlId)` — builds the best-sellers URL using `SITE_DOMAINS` + `SITE_BESTSELLER_SLUG` (`/mas-vendidos/{id}` for Spanish sites, `/mais-vendidos/{id}` for Brazil).
 - `SITE_GEO` — 2-letter geo codes for Decodo's `geo` param (`MLC → cl`, etc.).
 
-**Language support (es + pt).** Most fields are read from language-agnostic inline JSON keys (`reviews`, `discount`, `installments_*`, `available_quantity`, `nickname`, etc.), so they work unchanged across all sites. The few **text-based** patterns are bilingual: `sold_count`/`seller_total_sales` accept es "mil/millón/millones" **and** pt "mil/milhão/milhões" (shared `MAGNITUDE` sub-pattern + `parseMagnitudeCount`); `seller_total_sales` matches "ventas"/"vendas"; `seller_total_products` matches "producto(s)"/"produto(s)" (`produc?tos?`); free shipping matches "Envío gratis"/"Frete grátis"; official-store fallback matches "Tienda oficial"/"Loja oficial". Verified live across the 7 scraped sites (Core 8 minus MLV) — only Brazil (MLB) is Portuguese; all 6 Spanish sites (AR/CL/MX/CO/PE/UY) share identical text. Re-validate with `node scripts/test-langs.js` after ML markup changes.
+**Language support (es + pt).** Most fields are read from language-agnostic inline JSON keys (`reviews`, `discount`, `installments_*`, `available_quantity`, `nickname`, etc.), so they work unchanged across all sites. The few **text-based** patterns are bilingual: `sold_count`/`seller_total_sales` accept es "mil/millón/millones" **and** pt "mil/milhão/milhões" (shared `MAGNITUDE` sub-pattern + `parseMagnitudeCount`); `seller_total_sales` matches "ventas"/"vendas"; `seller_total_products` matches "producto(s)"/"produto(s)" (`produc?tos?`); free shipping matches "Envío gratis"/"Frete grátis"; official-store fallback matches "Tienda oficial"/"Loja oficial". Verified live across all 7 Core markets — only Brazil (MLB) is Portuguese; the 6 Spanish sites (AR/CL/MX/CO/PE/UY) share identical text. Re-validate with `node scripts/test-langs.js` after ML markup changes.
 
 **3. Per-product enrichment via ML API.**
 For each product with a `catalog_id`, `MercadoLibreClient.getCatalogProduct()` calls `GET /products/{catalog_id}` with a `client_credentials` OAuth2 token. Returns `date_created`. Runs in parallel with the page scraping via `pLimit(8)`.
@@ -299,7 +299,7 @@ Manages the OAuth2 token (`client_credentials`) automatically: renews it if less
 Products that appear in más-vendidos via `/up/` URLs (no catalog product) cannot be enriched via API or product page scraping. They are saved with `catalog_id = null` and all enrichment fields as `null`. Name and price are still captured.
 
 ### Categories without "más vendidos" page
-Some MercadoLibre parent categories do not have a `/mas-vendidos/{id}` page. These return 0 products and are listed in the `errores` array of the response. This is expected — not a bug. The scraper detects the target's HTTP 404 (via Decodo's `status_code`) and logs it explicitly as "Category … has no /mas-vendidos page".
+Some MercadoLibre parent categories do not have a `/mas-vendidos/{id}` page even though they exist in the category tree. The clearest case is **vehicles** (`Autos, Motos y Otros` / `Carros, Motos e Outros`): private-vehicle listings are **classifieds**, not catalog products, so ML never builds a best-sellers ranking for them and the page 404s. Other verticals (e.g. real estate, services) behave the same way. These return 0 products and are listed in the `errores` array of the response. This is **expected, validated behavior — not a bug**: the scraper detects the target's HTTP 404 (via Decodo's `status_code`), logs it explicitly as "Category … has no /mas-vendidos page", and moves on without tripping the circuit breaker (a 404 is not a hard failure). Covered by `ml-scraper.service.spec.ts`.
 
 ### Variable product count per category (0–20)
 A best-sellers page lists **at most 20** products, but the actual count is whatever ML ranks for that category — it can be **fewer than 20, just 1, or even 0** (an empty but valid section). The scraper never pads to 20: Step 2 enriches exactly the N products parsed from the category page, and "Saved N products" reflects that real N. So a category returning, say, 10 products is normal and not a partial-render failure (those are detected separately by the <50 KB size check, not by product count).
@@ -308,7 +308,7 @@ A best-sellers page lists **at most 20** products, but the actual count is whate
 The best-sellers section slug is **language-specific**. Spanish sites use `/mas-vendidos/{id}`; **Brazil (MLB)** is Portuguese and uses `/mais-vendidos/{id}` — `mercadolivre.com.br/mas-vendidos` returns a hard 404. `categoryUrl()` resolves the slug per site via `SITE_BESTSELLER_SLUG` (defaults to `mas-vendidos`). Verified live 2026-05-30 across all 10 sites: only MLB differs.
 
 ### Markets with no best-sellers section (MLD, MLV)
-`MLD` (Dominican Republic) and `MLV` (Venezuela) run a reduced/classifieds-only MercadoLibre with **no best-sellers section at all** — every `/mas-vendidos[/...]` and `/mais-vendidos` path 404s regardless of category. They are listed in `SITES_WITHOUT_BESTSELLERS` (`ml-parsers.ts`); `MlScraperService.scrapeCategoryWithProducts` skips them **before issuing any billed request**, returning 0 products. Note MLV is part of the PRODUCTION Core 8 — the skip saves ~30 wasted category requests/run. Category sync (ML API) still runs for these sites; only product scraping is skipped.
+`MLD` (Dominican Republic) and `MLV` (Venezuela) run a reduced/classifieds-only MercadoLibre with **no best-sellers section at all** — every `/mas-vendidos[/...]` and `/mais-vendidos` path 404s regardless of category. They are listed in `SITES_WITHOUT_BESTSELLERS` (`ml-parsers.ts`); `MlScraperService.scrapeCategoryWithProducts` skips them **before issuing any billed request**, returning 0 products. Both are excluded from the PRODUCTION **Core 7** site list (`PROD_CORE_SITES` in `app.config.ts`), so product scraping never targets them. If you re-add either site to a custom `SNAPSHOT_SITE_IDS`, the in-scraper skip still saves the wasted category requests, but category sync (ML API) would run for them.
 
 ### ML Search API is blocked
 `/sites/{siteId}/search?category=...` returns 403 even with a valid OAuth2 `client_credentials` token. MercadoLibre no longer allows browsing third-party product listings via API. Scraping is the only viable approach.
@@ -334,10 +334,12 @@ The application already supports multiple MercadoLibre sites without code change
 
 ```env
 # .env — configure which sites to snapshot weekly (comma-separated)
-SNAPSHOT_SITE_IDS=MLA,MLB,MLC,MLM,MCO,MPE,MLU,MLV   # Core 8 LatAm markets (default)
+SNAPSHOT_SITE_IDS=MLA,MLB,MLC,MLM,MCO,MPE,MLU   # Core 7 LatAm markets (default)
 # Available: MLA (Argentina), MLB (Brazil), MLC (Chile), MLM (Mexico),
-# MCO (Colombia), MPE (Peru), MLU (Uruguay), MLV (Venezuela),
-# plus 11 smaller markets (MBO, MCR, MCU, MEC, MGT, MHN, MNI, MPA, MPY, MRD, MSV)
+# MCO (Colombia), MPE (Peru), MLU (Uruguay).
+# MLV (Venezuela) and MLD (Dominican Republic) are reduced/classifieds-only
+# markets with no best-sellers section — excluded (would yield 0 products).
+# Plus 11 smaller markets (MBO, MCR, MCU, MEC, MGT, MHN, MNI, MPA, MPY, MRD, MSV).
 ```
 
 Behavior:
@@ -370,26 +372,26 @@ ML has **19 sites** with **484 parent categories total**. Three realistic scopes
 | Scope | Sites | Parent cats | Req/sync | Req/mo (weekly) | Sync duration |
 |---|---|---:|---:|---:|---|
 | **Single site** (e.g. MLC) | 1 | 32 | 672 | ~2.9k | ~13 min |
-| **Core 8 LatAm** (recommended) | MLA, MLB, MLC, MLM, MCO, MPE, MLU, MLV | 251 | 5.27k | ~22.8k | ~100 min |
+| **Core 7 LatAm** (recommended) | MLA, MLB, MLC, MLM, MCO, MPE, MLU | ~225 | ~4.7k | ~20k | ~90 min |
 | **All 19 sites** | every ML site | 484 | 10.16k | ~44k | ~2.5 h |
 
 ### Decodo cost per month
 
 Decodo prepaid wallet — the more you load, the cheaper each request. Premium+JS rate per tier:
 
-| Wallet loaded | Rate per 1K | 1 site (2.9k) | Core 8 (22.8k) | All 19 (44k) |
+| Wallet loaded | Rate per 1K | 1 site (2.9k) | Core 7 (~20k) | All 19 (44k) |
 |---|---|---:|---:|---:|
-| $19   | $1.50 | $4.37 | $34.23  | $66.02 |
-| $49   | $1.25 | $3.64 | $28.52  | $55.01 |
-| $99   | $1.20 | $3.49 | $27.38  | $52.81 |
-| $249  | $1.15 | $3.35 | $26.24  | $50.61 |
-| $499  | $1.10 | $3.20 | $25.09  | $48.41 |
-| $999  | $1.05 | $3.06 | $23.95  | $46.21 |
-| $1499 | $1.00 | $2.91 | $22.81  | $44.01 |
+| $19   | $1.50 | $4.37 | $30.00  | $66.02 |
+| $49   | $1.25 | $3.64 | $25.00  | $55.01 |
+| $99   | $1.20 | $3.49 | $24.00  | $52.81 |
+| $249  | $1.15 | $3.35 | $23.00  | $50.61 |
+| $499  | $1.10 | $3.20 | $22.00  | $48.41 |
+| $999  | $1.05 | $3.06 | $21.00  | $46.21 |
+| $1499 | $1.00 | $2.91 | $20.00  | $44.01 |
 
 ### Practical tier recommendation
 
-- **1 site or Core 8 → stay on the $19 wallet.** Even at Core 8 ($34/mo), the $19 wallet refills monthly with minimal admin overhead. Upgrading to $249 saves only ~$8/mo and ties up 7 months of credit.
+- **1 site or Core 7 → stay on the $19 wallet.** Even at Core 7 (~$30/mo), the $19 wallet refills monthly with minimal admin overhead. Upgrading to $249 saves only ~$7/mo and ties up ~8 months of credit.
 - **All 19 sites → consider $249** ($24/mo savings vs $19 tier, wallet lasts ~5 months). Above $249 the marginal savings flatten (~$2/mo per tier step).
 
 Per-request math: parent_cats × 21 nav (1 cat + 20 prod) × 4.33 weeks/mo. The 21 is the **per-category ceiling** (a best-sellers page lists 0–20 products); categories with fewer products cost proportionally less, so these figures are upper bounds. Validated 100 % success rate, no retries factored in.
@@ -400,11 +402,11 @@ Per-request math: parent_cats × 21 nav (1 cat + 20 prod) × 4.33 weeks/mo. The 
 - Captures product ranking shifts, reviews accumulation, pricing trends
 - Typical MercadoLibre dynamics: ~7–10 day cycles for top-seller rotation
 - Per year: ~52 snapshots/category = good granularity for year-over-year analysis
-- Cost at Core 8 scope: ~$34/mo Decodo ($19 tier)
+- Cost at Core 7 scope: ~$30/mo Decodo ($19 tier)
 
 **For additional granularity** (e.g., mid-week snapshots):
 - Add a second cron job via environment config (e.g., Thursday 15 UTC)
-- Cost: doubles the figures above — Core 8 still under $70/mo
+- Cost: doubles the figures above — Core 7 still under $65/mo
 
 **Not recommended:**
 - **Daily**: 7× the weekly cost — too expensive for minimal incremental insight
@@ -464,7 +466,7 @@ Defined in `src/config/app.config.ts`, read from `.env`:
 
 | Variable | Default | Description |
 |---|---|---|
-| `APP_MODE` | `DEVELOPMENT` | `DEVELOPMENT` → MLC + MLC1648 only. `PRODUCTION` → 8 core sites, all parent categories. Any other value falls back to `DEVELOPMENT`. Overrides `SNAPSHOT_SITE_IDS` / `SNAPSHOT_CATEGORIES_*`. |
+| `APP_MODE` | `DEVELOPMENT` | `DEVELOPMENT` → MLC + MLC1648 only. `PRODUCTION` → 7 core sites, all parent categories. Any other value falls back to `DEVELOPMENT`. Overrides `SNAPSHOT_SITE_IDS` / `SNAPSHOT_CATEGORIES_*`. |
 | `DATABASE_URL` | postgres local | Runtime connection. In production points to Neon's **pooled** URL (`...-pooler.neon.tech`). |
 | `DIRECT_URL` | unset | Direct (non-pooled) connection used by `prisma db push` / `migrate`. Required when `DATABASE_URL` points to pgBouncer (Neon pooler). Falls back to `DATABASE_URL` when unset. |
 | `ML_CLIENT_ID` | `""` | MercadoLibre OAuth2 client ID |

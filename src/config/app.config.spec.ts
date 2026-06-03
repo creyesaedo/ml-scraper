@@ -1,6 +1,6 @@
 import appConfig from './app.config';
 
-const CORE_SITES = ['MLA', 'MLB', 'MLC', 'MLM', 'MCO', 'MPE', 'MLU', 'MLV'];
+const CORE_SITES = ['MLA', 'MLB', 'MLC', 'MLM', 'MCO', 'MPE', 'MLU'];
 
 /** Runs the registerAs factory with a clean copy of process.env. */
 function load() {
@@ -33,7 +33,7 @@ describe('app.config', () => {
       expect(CORE_SITES).toContain(cfg.snapshotSiteIds[0]);
     });
 
-    it('enables PRODUCTION with all 8 core sites for the exact value', () => {
+    it('enables PRODUCTION with all 7 core sites for the exact value', () => {
       process.env.APP_MODE = 'PRODUCTION';
       const cfg = load();
       expect(cfg.appMode).toBe('PRODUCTION');

@@ -21,7 +21,10 @@ export interface AppConfig {
   syncHour: number;
 }
 
-const PROD_CORE_SITES = ['MLA', 'MLB', 'MLC', 'MLM', 'MCO', 'MPE', 'MLU', 'MLV'];
+// Venezuela (MLV) and Dominican Republic (MLD) run a reduced/classifieds-only
+// MercadoLibre with no best-sellers section, so they are excluded — product
+// scraping there yields 0 rows (see SITES_WITHOUT_BESTSELLERS in ml-parsers.ts).
+const PROD_CORE_SITES = ['MLA', 'MLB', 'MLC', 'MLM', 'MCO', 'MPE', 'MLU'];
 
 /**
  * Reads APP_MODE. Only the exact value "PRODUCTION" turns production on;
@@ -55,7 +58,7 @@ export default registerAs(
     // APP_MODE is the single source of truth for which sites/categories to scrape.
     // DEVELOPMENT intentionally ignores SNAPSHOT_SITE_IDS / SNAPSHOT_CATEGORIES_* to
     // prevent accidental production spend when the env vars are mis-set.
-    // In DEVELOPMENT we pick a random site from the 8 core. The specific parent
+    // In DEVELOPMENT we pick a random site from the 7 core. The specific parent
     // category is picked at runtime from the DB by the CLI (see run-sync.ts),
     // since it needs a live query against the categories table.
     const snapshotSiteIds =
