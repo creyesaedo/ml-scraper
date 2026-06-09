@@ -17,6 +17,15 @@ model Category {
   ml_id     String  @unique @db.VarChar(50)
   parent_id Int?
 
+  // Whether this category has a usable /mas-vendidos best-sellers page.
+  // null  = not yet evaluated (default for new rows; the scraper still tries it)
+  // true  = ranking present (products were found when probed)
+  // false = no usable ranking (hard 404, soft-404, empty, or auth-gated like
+  //         some Perú verticals) — the product collector skips it to save a
+  //         wasted Decodo request. Set by the probe phase of CategorySyncService.
+  has_bestsellers        Boolean?
+  bestsellers_checked_at DateTime?
+
   parent   Category?  @relation("CategoryTree", fields: [parent_id], references: [id])
   children Category[] @relation("CategoryTree")
 

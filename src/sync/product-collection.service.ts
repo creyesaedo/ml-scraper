@@ -52,6 +52,31 @@ function toUsd(local: number | null, rate: number | null): number | null {
   return Number.isFinite(usd) ? Math.round(usd * 100) / 100 : null;
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * True when an error signals the database is unreachable — at connect time
+ * (`PrismaClientInitializationError`) OR mid-query (the common Neon case: the
+ * pooler closing idle connections, scale-to-zero, or a DNS/TCP blip). Prisma
+ * surfaces the latter under different classes/codes than the init error, and the
+ * pg driver may bubble the raw socket error, so we match Prisma's connection
+ * codes (P1001 can't-reach, P1002/P1008 timeout, P1017 server-closed) and the
+ * underlying network `cause.code` / message as well. Used both to decide whether
+ * a write is worth retrying and to classify a run-level `database` abort.
+ */
+function isDatabaseDownError(err: unknown): boolean {
+  if (err instanceof Prisma.PrismaClientInitializationError) return true;
+  const code = (err as { code?: string })?.code ?? '';
+  if (['P1001', 'P1002', 'P1008', 'P1017'].includes(code)) return true;
+  const causeCode = (err as { cause?: { code?: string } })?.cause?.code ?? '';
+  const msg = (err as Error)?.message ?? '';
+  return /EAI_AGAIN|ENOTFOUND|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|Connection terminated|Can't reach database server|closed the connection/i.test(
+    `${msg} ${causeCode}`,
+  );
+}
+
 /**
  * The expensive half of a sync: scrapes best-seller products for a site's
  * categories, enriches them (ML API + product-page data + leaf category +
@@ -244,6 +269,21 @@ export class ProductCollectionService {
       };
     }
 
+    // Skip categories already known to have no usable /mas-vendidos page
+    // (has_bestsellers = false — set by the category-sync probe). null/true are
+    // kept: null means "never evaluated, try it"; true means "has a ranking".
+    // This avoids one wasted Decodo request per dead category every run.
+    if (this.configService.get<boolean>('app.skipKnownEmptyCategories')) {
+      const before = rootCategories.length;
+      rootCategories = rootCategories.filter((c) => c.has_bestsellers !== false);
+      const skipped = before - rootCategories.length;
+      if (skipped > 0) {
+        this.logger.log(
+          `[${siteId}] Skipping ${skipped} categories flagged without a best-sellers page`,
+        );
+      }
+    }
+
     // Whitelist takes precedence over limit. If neither is set → all categories (production default).
     const whitelistBySite =
       this.configService.get<Record<string, string[]>>('app.snapshotCategoriesBySite') ?? {};
@@ -337,9 +377,9 @@ export class ProductCollectionService {
       remaining.map((rootCat) =>
         categoryLimit(async () => {
           if (abortError) return; // skip new work once a fatal failure occurred
-          await this.markCategoryInProgress(syncRunId, rootCat.ml_id);
 
           try {
+            await this.markCategoryInProgress(syncRunId, rootCat.ml_id);
             this.logger.log(`[${siteId}] Starting category ${rootCat.ml_id}`);
             const { products: scraped, enrichmentsByUrl } =
               await this.scraper.scrapeCategoryWithProducts(siteId, rootCat.ml_id, 8);
@@ -417,39 +457,41 @@ export class ProductCollectionService {
             this.logger.log(
               `[${siteId}] ${rootCat.ml_id}: enrichment finished in ${((Date.now() - enrichStart) / 1000).toFixed(1)}s — inserting ${enriched.length} rows`,
             );
-            await this.prisma.product.createMany({
-              data: enriched.map((p) => ({
-                name: p.name,
-                price: p.price,
-                country: siteId,
-                category_id: p.category_id,
-                parent_id: p.parent_id,
-                seller_id: p.seller_id,
-                snapshot_date: snapshotDate,
-                catalog_id: p.catalog_id,
-                ml_public_id: p.ml_public_id,
-                date_created: p.date_created,
-                sold_count: p.sold_count,
-                rating: p.rating,
-                review_count: p.review_count,
-                brand: p.brand,
-                holiday_name: holidayName,
-                ranking_position: p.ranking_position,
-                original_price: p.original_price,
-                discount_pct: p.discount_pct,
-                shipping_type: p.shipping_type,
-                listing_type_id: p.listing_type_id,
-                is_cbt: p.is_cbt,
-                currency,
-                exchange_rate: exchangeRate,
-                usd_price: toUsd(Number(p.price), exchangeRate),
-                usd_original_price: toUsd(p.original_price, exchangeRate),
-                available_quantity: p.available_quantity,
-                installments_quantity: p.installments_quantity,
-                installments_amount: p.installments_amount,
-                installments_interest_free: p.installments_interest_free,
-              })),
-            });
+            const snapshotRows = enriched.map((p) => ({
+              name: p.name,
+              price: p.price,
+              country: siteId,
+              category_id: p.category_id,
+              parent_id: p.parent_id,
+              seller_id: p.seller_id,
+              snapshot_date: snapshotDate,
+              catalog_id: p.catalog_id,
+              ml_public_id: p.ml_public_id,
+              date_created: p.date_created,
+              sold_count: p.sold_count,
+              rating: p.rating,
+              review_count: p.review_count,
+              brand: p.brand,
+              holiday_name: holidayName,
+              ranking_position: p.ranking_position,
+              original_price: p.original_price,
+              discount_pct: p.discount_pct,
+              shipping_type: p.shipping_type,
+              listing_type_id: p.listing_type_id,
+              is_cbt: p.is_cbt,
+              currency,
+              exchange_rate: exchangeRate,
+              usd_price: toUsd(Number(p.price), exchangeRate),
+              usd_original_price: toUsd(p.original_price, exchangeRate),
+              available_quantity: p.available_quantity,
+              installments_quantity: p.installments_quantity,
+              installments_amount: p.installments_amount,
+              installments_interest_free: p.installments_interest_free,
+            }));
+            await this.withDbRetry(
+              () => this.prisma.product.createMany({ data: snapshotRows }),
+              `createMany ${rootCat.ml_id}`,
+            );
 
             totalProducts += enriched.length;
             this.logger.log(`Saved ${enriched.length} products for category ${rootCat.ml_id}`);
@@ -464,20 +506,29 @@ export class ProductCollectionService {
               await this.markCategoryFailed(syncRunId, rootCat.ml_id, err.message);
               return;
             }
-            // Database unreachable (e.g. Neon asleep/down). Every later save
-            // would fail the same way, so abort instead of paying Decodo for
-            // data we cannot store. Guard the checkpoint write — it hits the
-            // same dead DB — so it never masks the original error.
-            if (err instanceof Prisma.PrismaClientInitializationError) {
-              abortError = err;
+            // Database unreachable (e.g. Neon asleep/down, pooler dropped the
+            // connection mid-query). The writes above already retried transient
+            // blips via withDbRetry, so reaching here means it did not recover:
+            // every later save would fail the same way, so abort instead of
+            // paying Decodo for data we cannot store. Guard the checkpoint write
+            // — it hits the same dead DB — so it never masks the original error.
+            if (isDatabaseDownError(err)) {
+              abortError = err as Error;
               abortReason = 'database';
-              this.logger.error(`[${siteId}] Database unreachable — aborting sync: ${err.message}`);
-              await this.markCategoryFailed(syncRunId, rootCat.ml_id, err.message).catch(() => undefined);
+              this.logger.error(
+                `[${siteId}] Database unreachable — aborting sync: ${(err as Error).message}`,
+              );
+              await this.markCategoryFailed(syncRunId, rootCat.ml_id, (err as Error).message).catch(
+                () => undefined,
+              );
               return;
             }
             const msg = (err as Error).message;
             errors.push(`${rootCat.ml_id}: ${msg}`);
-            await this.markCategoryFailed(syncRunId, rootCat.ml_id, msg);
+            // Guard: a checkpoint write can itself fail (e.g. the DB just went
+            // down). Don't let that reject the closure and crash the whole run —
+            // the next category's withDbRetry / abort path will catch a real outage.
+            await this.markCategoryFailed(syncRunId, rootCat.ml_id, msg).catch(() => undefined);
           }
         }),
       ),
@@ -573,28 +624,69 @@ export class ProductCollectionService {
     return { syncRunId, doneCategoryIds: new Set<string>() };
   }
 
+  /**
+   * Runs a DB operation, retrying on transient connection errors (a brief Neon
+   * blip — pooler reconnect, scale-to-zero wake) which usually clear within
+   * seconds. Non-transient errors throw immediately. If every attempt fails the
+   * last error propagates, so the caller can still classify a `database` abort.
+   */
+  private async withDbRetry<T>(op: () => Promise<T>, label: string, attempts = 3): Promise<T> {
+    let lastErr: unknown;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        return await op();
+      } catch (err) {
+        lastErr = err;
+        if (attempt < attempts && isDatabaseDownError(err)) {
+          const wait = 1000 * attempt;
+          this.logger.warn(
+            `DB op '${label}' failed (attempt ${attempt}/${attempts}): ` +
+              `${(err as Error).message} — retrying in ${wait}ms`,
+          );
+          await sleep(wait);
+          continue;
+        }
+        throw err;
+      }
+    }
+    throw lastErr;
+  }
+
   // The three helpers below move a category's checkpoint row through its
   // lifecycle (in_progress → done | failed). The sync_progress table is the
-  // source of truth used by resume to know what still needs scraping.
+  // source of truth used by resume to know what still needs scraping. Each is
+  // wrapped in withDbRetry so a transient Neon blip doesn't lose a checkpoint.
 
   private markCategoryInProgress(syncRunId: string, categoryMlId: string) {
-    return this.prisma.syncProgress.update({
-      where: { sync_run_id_category_ml_id: { sync_run_id: syncRunId, category_ml_id: categoryMlId } },
-      data: { status: 'in_progress', started_at: new Date(), error_msg: null },
-    });
+    return this.withDbRetry(
+      () =>
+        this.prisma.syncProgress.update({
+          where: { sync_run_id_category_ml_id: { sync_run_id: syncRunId, category_ml_id: categoryMlId } },
+          data: { status: 'in_progress', started_at: new Date(), error_msg: null },
+        }),
+      `markCategoryInProgress ${categoryMlId}`,
+    );
   }
 
   private markCategoryDone(syncRunId: string, categoryMlId: string) {
-    return this.prisma.syncProgress.update({
-      where: { sync_run_id_category_ml_id: { sync_run_id: syncRunId, category_ml_id: categoryMlId } },
-      data: { status: 'done', completed_at: new Date() },
-    });
+    return this.withDbRetry(
+      () =>
+        this.prisma.syncProgress.update({
+          where: { sync_run_id_category_ml_id: { sync_run_id: syncRunId, category_ml_id: categoryMlId } },
+          data: { status: 'done', completed_at: new Date() },
+        }),
+      `markCategoryDone ${categoryMlId}`,
+    );
   }
 
   private markCategoryFailed(syncRunId: string, categoryMlId: string, errorMsg: string) {
-    return this.prisma.syncProgress.update({
-      where: { sync_run_id_category_ml_id: { sync_run_id: syncRunId, category_ml_id: categoryMlId } },
-      data: { status: 'failed', completed_at: new Date(), error_msg: errorMsg.slice(0, 1000) },
-    });
+    return this.withDbRetry(
+      () =>
+        this.prisma.syncProgress.update({
+          where: { sync_run_id_category_ml_id: { sync_run_id: syncRunId, category_ml_id: categoryMlId } },
+          data: { status: 'failed', completed_at: new Date(), error_msg: errorMsg.slice(0, 1000) },
+        }),
+      `markCategoryFailed ${categoryMlId}`,
+    );
   }
 }

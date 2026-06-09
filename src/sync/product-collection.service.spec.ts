@@ -28,6 +28,7 @@ function makeConfig(overrides: Record<string, any> = {}) {
     'app.snapshotCategoriesBySite': {},
     'app.snapshotCategoryLimit': null,
     'app.appMode': 'PRODUCTION',
+    'app.skipKnownEmptyCategories': true,
     ...overrides,
   };
   return { get: jest.fn((key: string) => values[key]) } as any;
@@ -139,6 +140,121 @@ describe('ProductCollectionService', () => {
     const result = await service.collect('MLC');
 
     expect(result.aborted?.reason).toBe('database');
+  });
+
+  it('retries a transient DB connection blip on insert and still saves', async () => {
+    // Make withDbRetry's backoff instant so the test doesn't really sleep.
+    const timer = jest
+      .spyOn(global, 'setTimeout')
+      .mockImplementation(((fn: any) => {
+        fn();
+        return 0 as any;
+      }) as any);
+    try {
+      const prisma = makePrisma();
+      prisma.category.findMany.mockResolvedValue([{ id: 1, ml_id: 'MLC1', name: 'A' }]);
+      // First insert hits a transient pooler drop, second one succeeds.
+      prisma.product.createMany
+        .mockRejectedValueOnce(new Error('Connection terminated unexpectedly'))
+        .mockResolvedValue({});
+      const { service, scraper } = makeService(prisma, makeConfig());
+      scraper.scrapeCategoryWithProducts.mockResolvedValue({
+        products: [product],
+        enrichmentsByUrl: new Map([[product.product_url, { ...EMPTY_ENRICHMENT }]]),
+      });
+
+      const result = await service.collect('MLC');
+
+      expect(prisma.product.createMany).toHaveBeenCalledTimes(2);
+      expect(result.products_saved).toBe(1);
+      expect(result.aborted).toBeUndefined();
+    } finally {
+      timer.mockRestore();
+    }
+  });
+
+  it('aborts with reason database on a persistent connection error (not just init errors)', async () => {
+    const timer = jest
+      .spyOn(global, 'setTimeout')
+      .mockImplementation(((fn: any) => {
+        fn();
+        return 0 as any;
+      }) as any);
+    try {
+      const prisma = makePrisma();
+      prisma.category.findMany.mockResolvedValue([{ id: 1, ml_id: 'MLC1', name: 'A' }]);
+      // A mid-query Neon drop surfaces as a raw connection error, NOT a
+      // PrismaClientInitializationError — must still be treated as `database`.
+      prisma.product.createMany.mockRejectedValue(
+        new Error("Can't reach database server at ep-xyz.neon.tech"),
+      );
+      const { service, scraper } = makeService(prisma, makeConfig());
+      scraper.scrapeCategoryWithProducts.mockResolvedValue({
+        products: [product],
+        enrichmentsByUrl: new Map([[product.product_url, { ...EMPTY_ENRICHMENT }]]),
+      });
+
+      const result = await service.collect('MLC');
+
+      expect(result.aborted?.reason).toBe('database');
+    } finally {
+      timer.mockRestore();
+    }
+  });
+
+  it('does not crash when a checkpoint write fails for a soft per-category error', async () => {
+    const prisma = makePrisma();
+    prisma.category.findMany.mockResolvedValue([{ id: 1, ml_id: 'MLC1', name: 'A' }]);
+    const { service, scraper } = makeService(prisma, makeConfig());
+    // Non-DB scrape failure → soft per-category error path.
+    scraper.scrapeCategoryWithProducts.mockRejectedValue(new Error('boom'));
+    // The "mark failed" checkpoint write itself fails — must be swallowed, not crash the run.
+    prisma.syncProgress.update.mockImplementation((args: any) =>
+      args.data.status === 'failed'
+        ? Promise.reject(new Error('checkpoint write failed'))
+        : Promise.resolve({}),
+    );
+
+    const result = await service.collect('MLC');
+
+    expect(result.errors).toContain('MLC1: boom');
+    expect(result.aborted).toBeUndefined();
+  });
+
+  it('skips categories flagged has_bestsellers=false and scrapes the rest', async () => {
+    const prisma = makePrisma();
+    prisma.category.findMany.mockResolvedValue([
+      { id: 1, ml_id: 'MLC1', name: 'NoRanking', has_bestsellers: false },
+      { id: 2, ml_id: 'MLC2', name: 'HasRanking', has_bestsellers: true },
+      { id: 3, ml_id: 'MLC3', name: 'Unknown', has_bestsellers: null },
+    ]);
+    const { service, scraper } = makeService(prisma, makeConfig());
+    scraper.scrapeCategoryWithProducts.mockResolvedValue({
+      products: [product],
+      enrichmentsByUrl: new Map([[product.product_url, { ...EMPTY_ENRICHMENT }]]),
+    });
+
+    const result = await service.collect('MLC');
+
+    // MLC1 (false) skipped; MLC2 (true) and MLC3 (null) scraped.
+    const scraped = scraper.scrapeCategoryWithProducts.mock.calls.map((c: any[]) => c[1]);
+    expect(scraped).toEqual(['MLC2', 'MLC3']);
+    expect(scraped).not.toContain('MLC1');
+    expect(result.categories_processed).toBe(2);
+  });
+
+  it('does not skip flagged categories when skipKnownEmptyCategories is off', async () => {
+    const prisma = makePrisma();
+    prisma.category.findMany.mockResolvedValue([
+      { id: 1, ml_id: 'MLC1', name: 'NoRanking', has_bestsellers: false },
+    ]);
+    const config = makeConfig({ 'app.skipKnownEmptyCategories': false });
+    const { service, scraper } = makeService(prisma, config);
+    scraper.scrapeCategoryWithProducts.mockResolvedValue({ products: [], enrichmentsByUrl: new Map() });
+
+    await service.collect('MLC');
+
+    expect(scraper.scrapeCategoryWithProducts).toHaveBeenCalledWith('MLC', 'MLC1', expect.anything());
   });
 
   it('records a category with no results in errors and marks it done', async () => {

@@ -179,6 +179,41 @@ export class MlScraperService {
     return { products, enrichmentsByUrl };
   }
 
+  /**
+   * Lightweight check of whether a category has a usable /mas-vendidos page,
+   * issuing ONLY the category-page request (never the 20 product pages). Used by
+   * the category-sync probe phase to flag dead categories so the collector can
+   * skip them. Reuses the same render chain + partial-render retry as a real
+   * scrape, so the verdict matches what collection would have seen.
+   *
+   *   'has_products' — ranking present (1+ products rendered)
+   *   'empty'        — page rendered fully (200, ≥50 KB) but 0 products
+   *                    (soft-404 / no ranking / auth-gated like some Perú verticals)
+   *   'no_page'      — target returned HTTP ≥400, or the site has no best-sellers
+   *   'failed'       — network/Decodo error or partial render (inconclusive — the
+   *                    caller should NOT mark the category, so a glitch never
+   *                    blacklists a category)
+   *
+   * Run-level aborts (circuit breaker, Decodo account error) propagate as usual.
+   */
+  async probeCategoryBestSellers(
+    siteId: string,
+    categoryMlId: string,
+  ): Promise<'has_products' | 'empty' | 'no_page' | 'failed'> {
+    if (!this.config.decodoApiToken) {
+      this.logger.error('DECODO_API_TOKEN is not configured');
+      return 'failed';
+    }
+    if (!siteHasBestSellers(siteId)) return 'no_page';
+
+    const url = categoryUrl(siteId, categoryMlId);
+    const res = await this.scrapeWithWait(url, siteId, CATEGORY_WAIT_SELECTOR);
+    if (res.error) return 'failed';
+    if (res.targetStatus && res.targetStatus >= 400) return 'no_page';
+    if (res.content.length < PARTIAL_PAGE_THRESHOLD) return 'failed';
+    return parseCategoryHtml(res.content).length > 0 ? 'has_products' : 'empty';
+  }
+
   private async scrapeProductPage(
     productUrl: string,
     siteId: string,
@@ -383,6 +418,17 @@ export class MlScraperService {
 
     if (!res.ok) {
       const text = await res.text().catch(() => '');
+      // Transient Decodo-side failures — HTTP 400 "Something went wrong. Please
+      // try again later" bursts and 5xx gateway errors — clear on a retry.
+      // Back off and retry once. Account errors (401/402/403) are permanent and
+      // handled by the caller, so they are never retried here.
+      if (!retried && !isDecodoAccountError(res.status)) {
+        this.logger.warn(
+          `Decodo HTTP ${res.status} for ${targetUrl}: ${text.slice(0, 120)} — retrying in 1s`,
+        );
+        await sleep(1000);
+        return this.postScrapeInner(body, true);
+      }
       return {
         content: '',
         targetStatus: null,

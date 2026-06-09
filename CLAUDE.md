@@ -133,7 +133,7 @@ TRIGGER: POST /sync/run/:siteId  OR  weekly cron (WeeklySyncJob)
                              │   │     SELECTOR: 'li.ui-search-layout__item' (category)
                              │   │            or '.ui-pdp-price' (product)
                              │   │   Sliding-window rate limiter (DECODO_RATE_LIMIT_PER_SEC) before
-                             │   │   each request; HTTP 429 → 1s backoff + 1 retry (not billed)
+                             │   │   each request; transient Decodo HTTP 429/400/5xx → 1s backoff + 1 retry
                              │   ├─ Step 1: Category page → cheerio → 0–20 products
                              │   │   (a best-sellers page lists *up to* 20; it may
                              │   │   have as few as 1, or 0 if the section is empty)
@@ -192,7 +192,7 @@ When a **run-level failure** aborts mid-run, `/sync/run` or `/sync/products` ret
 |---|---|---|
 | `circuit_breaker` | `SCRAPER_FAILURE_THRESHOLD` consecutive hard scraper failures (see below) | Resume after the upstream issue clears |
 | `decodo_account` | Decodo returns HTTP `401`/`402`/`403` — invalid/expired token, **out of balance**, or forbidden. Aborts on the **first** occurrence (every later request fails identically) | Top up the Decodo wallet / fix the token, then resume |
-| `database` | A snapshot insert throws `PrismaClientInitializationError` — the DB (e.g. Neon) is unreachable mid-run | Wait for the DB to come back, then resume |
+| `database` | A critical DB write (snapshot insert or checkpoint) keeps failing with a connection error after retries — the DB (e.g. Neon) is unreachable mid-run. Detected broadly: `PrismaClientInitializationError` **and** mid-query drops (Prisma `P1001`/`P1002`/`P1008`/`P1017`, or a raw `ECONNRESET`/`EAI_AGAIN`/`Connection terminated` cause) | Wait for the DB to come back, then resume |
 
 All three stop launching new categories and checkpoint progress so the run is resumable via `POST /sync/resume/:siteId`. `consecutive_failures`/`threshold`/`diagnostics_dir` are populated by the circuit breaker; for `decodo_account`/`database` they reflect breaker state at abort time (usually 0 / null).
 
@@ -218,6 +218,8 @@ All three stop launching new categories and checkpoint progress so the run is re
 
 **1. Category sync — via MercadoLibre official API.**
 `CategorySyncService` uses `MercadoLibreClient` (axios) to fetch the category tree for a site (e.g. `MLC`). It upserts root categories first (via `prisma.category.upsert`) to get their DB IDs, then fetches their children in parallel with `Promise.allSettled` + `pLimit(8)`. Individual subcategory failures are logged and skipped — they do not abort the full sync.
+
+**Best-sellers probe (after sync).** Unless `PROBE_BESTSELLERS_ON_CATEGORY_SYNC=false`, `sync()` then probes each parent category of the **in-scope** sites (`snapshotSiteIds` — Core 7 in production, the random dev site otherwise) via `MlScraperService.probeCategoryBestSellers()` — one Decodo request per category, **no product pages** — and records `has_bestsellers` + `bestsellers_checked_at`. Verdicts: `has_products` → `true`; `empty`/`no_page` → `false`; `failed` (network/Decodo glitch or partial render) → left untouched so a transient blip never blacklists a category. A run-level abort (circuit breaker / Decodo account error) stops the probe without failing the category sync. Why probe here and not "learn" during collection: it pre-populates the flag deterministically (one cheap pass) so the very first product run already skips dead categories. The probe re-runs only when you re-run category sync — there is no automatic periodic re-check, so a category flagged `false` stays skipped until the next category sync re-evaluates it.
 
 **2. Product collection — via Decodo Web Scraping API.**
 
@@ -256,7 +258,7 @@ HTTP-only — no headless browser runs in our container. For each URL (category 
 - `headless: html` without JS rendering returns the PoW challenge page (~5–11 KB). ML's anti-bot validates TLS fingerprint, HTTP/2 frame ordering, and the runtime `window.snoopy.track('/anubis')` JS signal — only Decodo's premium + headless solver passes.
 - `browser_actions` chain works around a Decodo-side bug: ML pages use streaming SSR (React Server Components). Decodo's renderer sometimes captures HTML before all chunks arrive, returning only the `<head>` (~5–11 KB) with a 200 status. The chain forces (a) a hard 4 s pause for streaming to complete, (b) `scroll_to_bottom` to trigger lazy-hydration sections, (c) `wait_for_element` to verify the price block is in the DOM. With this chain, validation runs hit 100 % success across two verticals (tools + electronics); without it, 5–10 % of requests came back head-only.
 
-**Rate limiter:** sliding-window, capped at `DECODO_RATE_LIMIT_PER_SEC` (default 10, the Free/$19 plan ceiling). At real concurrency (8) and ~14 s per request, the effective rate is ~0.6 req/s — the limiter rarely binds. It is defensive against future concurrency increases or burst patterns. HTTP 429 from Decodo gets a 1 s backoff + single retry; per the docs, 429 responses are not billed.
+**Rate limiter:** sliding-window, capped at `DECODO_RATE_LIMIT_PER_SEC` (default 10, the Free/$19 plan ceiling). At real concurrency (8) and ~14 s per request, the effective rate is ~0.6 req/s — the limiter rarely binds. It is defensive against future concurrency increases or burst patterns. Transient Decodo responses get a 1 s backoff + single retry in `postScrapeInner`: HTTP `429` (rate cap, not billed) **and** Decodo-side `400` ("Something went wrong. Please try again later") / `5xx` gateway-error bursts — observed in the field, especially on MCO. Account errors (`401`/`402`/`403`) are permanent and never retried. Note: this retry reduces single-request loss but does **not** feed the circuit breaker, so a *sustained* Decodo 400 outage would still churn categories to 0 products without tripping the breaker.
 
 **Billing-aware error handling:** by Decodo's response-code rules, `200`/`204` always bill, `4xx` with non-empty body bills, but `500`/`524`/`613` ("failed to scrape") do not. A partial render (HTML <50 KB with a 200 status) is retried **once** by `scrapeWithWait` (controlled by `SCRAPER_RETRY_PARTIAL_RENDER`, default on); if the retry is still partial, the page degrades to `EMPTY_ENRICHMENT`. Each retry is an extra billed request, which is why it is bounded to one and only triggers on partial renders — hard failures (`5xx`/`613`) and expected `4xx` (no /mas-vendidos page) are never retried.
 
@@ -284,7 +286,7 @@ For each product with a `catalog_id`, `MercadoLibreClient.getCatalogProduct()` c
 
 Defined in `prisma/schema.prisma`. All column names are in English.
 
-- `Category` (`categories` table): two-level tree. Root categories have `parent_id = null`; leaf categories created during product scraping have `parent_id` pointing to their root. `ml_id` is the MercadoLibre ID (e.g. `"MLC1574"`), unique and indexed.
+- `Category` (`categories` table): two-level tree. Root categories have `parent_id = null`; leaf categories created during product scraping have `parent_id` pointing to their root. `ml_id` is the MercadoLibre ID (e.g. `"MLC1574"`), unique and indexed. `has_bestsellers` (nullable Boolean) + `bestsellers_checked_at` record whether the category has a usable `/mas-vendidos` page: `null` = not yet evaluated (scraper still tries it), `true` = ranking present, `false` = no usable ranking (hard 404 / soft-404 / empty / auth-gated like some Perú verticals). Set by the **best-sellers probe** phase of `CategorySyncService`; read by `ProductCollectionService` to skip dead categories (one wasted Decodo request each) when `SKIP_KNOWN_EMPTY_CATEGORIES` is on.
 - `Product` (`products` table): immutable snapshots. `category_id` points to the leaf category when known (with `parent_id` pointing to the root); when no leaf is resolved, `category_id` is the root and `parent_id` is `null`. `snapshot_date` enables price history. Enrichment fields (`catalog_id`, `listing_id`, `date_created`, `sold_count`, `rating`, `review_count`, `brand`) are nullable — products without a catalog page (`/up/` URLs) will have `catalog_id = null` and possibly missing enrichment.
 - `SyncProgress` (`sync_progress` table): per-category state for resumable syncs.
 - `Seller` (`sellers` table): deduped seller profiles extracted from product pages.
@@ -452,7 +454,7 @@ A single success resets the counter to 0. The breaker is reset at the start of e
 - **`CircuitBreakerOpenError`** → `reason: 'circuit_breaker'` (the consecutive-hard-failure breaker above).
 - **`DecodoAccountError`** → `reason: 'decodo_account'`. Thrown the instant Decodo replies `401`/`402`/`403` (bad/expired token, **out of balance**, or forbidden). These are account-wide: every subsequent request would fail identically and `402` is *not* a 5xx, so it would otherwise slip past the breaker's hard-failure check (and even reset the counter via `reportSuccess()`). Aborting on the first occurrence stops the run from grinding through every category with empty results — and from spending more Decodo credit.
 
-A third run-level abort lives in `ProductCollectionService` itself: a snapshot insert throwing Prisma's `PrismaClientInitializationError` (DB unreachable, e.g. Neon down) aborts with `reason: 'database'` — there is no point paying Decodo to scrape rows that cannot be stored. (Note: this relies on Prisma surfacing the connection failure as `PrismaClientInitializationError`; a mid-query drop that surfaces as a different error class falls back to the per-category soft-failure path and is collected in `errores` instead of aborting.)
+A third run-level abort lives in `ProductCollectionService` itself: when a critical DB write (the snapshot `createMany` or a checkpoint update) fails because the DB is unreachable (e.g. Neon down), it aborts with `reason: 'database'` — there is no point paying Decodo to scrape rows that cannot be stored. Two layers make this robust: (1) critical writes are wrapped in `withDbRetry`, which retries transient connection blips (the common Neon case — pooler reconnect / scale-to-zero wake — usually clears in seconds) before giving up; (2) the abort classifier `isDatabaseDownError` recognises not just `PrismaClientInitializationError` (connect-time) but mid-query drops too — Prisma codes `P1001`/`P1002`/`P1008`/`P1017` and raw network causes (`ECONNRESET`/`EAI_AGAIN`/`ENOTFOUND`/`Connection terminated`/`Can't reach database server`). Checkpoint writes in the catch path are also `.catch()`-guarded so a still-dead DB can never turn a graceful abort into an unhandled crash.
 
 ### Resume after abort
 
@@ -478,6 +480,8 @@ Defined in `src/config/app.config.ts`, read from `.env`:
 | `SCRAPER_FAILURE_THRESHOLD` | `10` | Consecutive hard failures before the circuit breaker trips, aborts the sync, and dumps diagnostics. |
 | `SCRAPER_FAILURE_DUMP_DIR` | `tmp/scraper-failures` | Directory (relative to cwd) where the breaker writes `error.log`, `sample.html`, `context.json` on trip. |
 | `SCRAPER_RETRY_PARTIAL_RENDER` | `true` | Retry a page once when Decodo returns a partial render (200 but HTML <50 KB). Set to `false` to skip the extra billed request and accept rows with null enrichment instead. |
+| `SKIP_KNOWN_EMPTY_CATEGORIES` | `true` | `ProductCollectionService` skips parent categories flagged `has_bestsellers = false` (no usable /mas-vendidos page), saving one Decodo request each per run. Set to `false` to force-scrape every category regardless of the flag. |
+| `PROBE_BESTSELLERS_ON_CATEGORY_SYNC` | `true` | After syncing categories, `CategorySyncService` probes each **in-scope** (`snapshotSiteIds` — Core 7 in production) parent category with one Decodo request (no product pages) and records `has_bestsellers`. ~225 requests (~$0.34) per category sync at Core 7. Set to `false` to keep category sync free (ML API only). |
 | `ENABLE_INTERNAL_SCHEDULER` | `false` | Opt-in for the in-process NestJS cron (`WeeklySyncJob`). Off by default to avoid double-scheduling when GitHub Actions or another external trigger is used. |
 | `SNAPSHOT_SITE_IDS` | (ignored) | **Ignored when `APP_MODE` is set.** Kept for backwards compat with manual overrides if you bypass the mode-derived defaults. |
 | `SNAPSHOT_CATEGORY_LIMIT` | unset | Cap on parent categories per site (by `id` ASC). Applies in PRODUCTION mode if you want a partial run. |

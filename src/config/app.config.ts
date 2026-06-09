@@ -14,6 +14,8 @@ export interface AppConfig {
   scraperFailureThreshold: number;
   scraperFailureDumpDir: string;
   scraperRetryPartialRender: boolean;
+  skipKnownEmptyCategories: boolean;
+  probeBestSellersOnCategorySync: boolean;
   snapshotSiteIds: string[];
   snapshotCategoryLimit: number | null;
   snapshotCategoriesBySite: Record<string, string[]>;
@@ -85,6 +87,13 @@ export default registerAs(
       // too small). Defaults to enabled; set to "false" to opt out and save the
       // extra billed request at the cost of more null-enrichment rows.
       scraperRetryPartialRender: process.env.SCRAPER_RETRY_PARTIAL_RENDER !== 'false',
+      // Product collection skips categories flagged has_bestsellers=false (no
+      // usable /mas-vendidos page), saving one wasted Decodo request each.
+      skipKnownEmptyCategories: process.env.SKIP_KNOWN_EMPTY_CATEGORIES !== 'false',
+      // Category sync probes each in-scope (snapshotSiteIds) parent category once
+      // and records has_bestsellers. Set to "false" to keep category sync free
+      // (ML API only) and rely on whatever flags already exist in the DB.
+      probeBestSellersOnCategorySync: process.env.PROBE_BESTSELLERS_ON_CATEGORY_SYNC !== 'false',
       snapshotSiteIds,
       snapshotCategoryLimit: parseCategoryLimit(process.env.SNAPSHOT_CATEGORY_LIMIT),
       snapshotCategoriesBySite,
