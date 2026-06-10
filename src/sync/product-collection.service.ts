@@ -213,8 +213,14 @@ export class ProductCollectionService {
         this.leafCategoryCache.set(leafMlId, null);
         return null;
       }
-      const created = await this.prisma.category.create({
-        data: { name: data.name, country, ml_id: leafMlId, parent_id: parentDbId },
+      // upsert (not create) to stay race-safe: up to 24 product enrichments run
+      // in parallel and two can resolve the same leaf at once, both missing the
+      // findUnique above. A plain create then loses the race with a unique-
+      // constraint error on ml_id; upsert's ON CONFLICT returns the existing row.
+      const created = await this.prisma.category.upsert({
+        where: { ml_id: leafMlId },
+        create: { name: data.name, country, ml_id: leafMlId, parent_id: parentDbId },
+        update: { name: data.name },
       });
       this.logger.log(`Created leaf category ${leafMlId} → "${data.name}" (parent_id=${parentDbId})`);
       this.leafCategoryCache.set(leafMlId, created.id);
