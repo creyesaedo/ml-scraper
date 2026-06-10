@@ -213,18 +213,31 @@ export class ProductCollectionService {
         this.leafCategoryCache.set(leafMlId, null);
         return null;
       }
-      // upsert (not create) to stay race-safe: up to 24 product enrichments run
-      // in parallel and two can resolve the same leaf at once, both missing the
-      // findUnique above. A plain create then loses the race with a unique-
-      // constraint error on ml_id; upsert's ON CONFLICT returns the existing row.
-      const created = await this.prisma.category.upsert({
-        where: { ml_id: leafMlId },
-        create: { name: data.name, country, ml_id: leafMlId, parent_id: parentDbId },
-        update: { name: data.name },
-      });
-      this.logger.log(`Created leaf category ${leafMlId} → "${data.name}" (parent_id=${parentDbId})`);
-      this.leafCategoryCache.set(leafMlId, created.id);
-      return created.id;
+      // create() (not upsert) so the "Created leaf category" log below fires
+      // exactly once per genuinely new leaf. Up to 24 product enrichments run in
+      // parallel and two can resolve the same leaf at once, both missing the
+      // findUnique above; the loser then hits a unique-constraint error on ml_id
+      // (P2002). Catch that and fetch the row the winner just created — race-safe,
+      // and without logging a spurious "Created" for the row that already existed.
+      try {
+        const created = await this.prisma.category.create({
+          data: { name: data.name, country, ml_id: leafMlId, parent_id: parentDbId },
+        });
+        this.logger.log(
+          `Created leaf category ${leafMlId} → "${data.name}" (parent_id=${parentDbId})`,
+        );
+        this.leafCategoryCache.set(leafMlId, created.id);
+        return created.id;
+      } catch (err) {
+        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+          const existing = await this.prisma.category.findUnique({ where: { ml_id: leafMlId } });
+          if (existing) {
+            this.leafCategoryCache.set(leafMlId, existing.id);
+            return existing.id;
+          }
+        }
+        throw err;
+      }
     } catch (err) {
       this.logger.warn(
         `Failed to resolve leaf category ${leafMlId} (parent_id=${parentDbId}): ${(err as Error).message}`,
