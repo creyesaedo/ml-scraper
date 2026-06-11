@@ -321,7 +321,7 @@ export class MlScraperService {
   private async postScrape(body: Record<string, unknown>): Promise<DecodoScrapeResult> {
     return this.slot(async () => {
       this.health.assertOpen();
-      const result = await this.postScrapeInner(body, false);
+      const result = await this.postScrapeInner(body, 0);
 
       // Account-level Decodo failure (out of balance / bad token / forbidden).
       // These are NOT >= 500, so they would otherwise slip past the hard-failure
@@ -336,14 +336,17 @@ export class MlScraperService {
       }
 
       const targetStatus = result.targetStatus;
+      // Any result that still carries an `error` after postScrapeInner exhausted
+      // its retry budget is a genuine failure: the URL failed every retry — a
+      // network drop, or a Decodo HTTP 400/429/5xx that never cleared. Count it
+      // toward the circuit breaker so a sustained outage still trips and aborts
+      // the run. Partial renders (0b) and expected target 4xx (no /mas-vendidos
+      // page) come back WITHOUT an `error`, so they stay off the counter.
       const isHardFailure =
-        // network error
-        (result.error?.startsWith('network:') ?? false) ||
-        // Decodo gateway error (rare)
-        result.decodoStatus >= 500 ||
-        // Decodo "failed to scrape" — not billed per Decodo docs
+        !!result.error ||
+        // Decodo "failed to scrape" — 200 envelope, no `error`, target 613
         targetStatus === 613 ||
-        // upstream 5xx from ML through Decodo
+        // upstream 5xx from ML through Decodo (200 envelope, target 5xx)
         (typeof targetStatus === 'number' && targetStatus >= 500 && targetStatus < 600);
 
       if (isHardFailure) {
@@ -366,7 +369,7 @@ export class MlScraperService {
 
   private async postScrapeInner(
     body: Record<string, unknown>,
-    retried: boolean,
+    attempt: number,
   ): Promise<DecodoScrapeResult> {
     await this.rateLimiter.acquire();
 
@@ -382,8 +385,8 @@ export class MlScraperService {
         },
         body: JSON.stringify(body),
       });
-      if (retried) {
-        this.logger.log(`Decodo retry succeeded for ${targetUrl}`);
+      if (attempt > 0) {
+        this.logger.log(`Decodo retry succeeded for ${targetUrl} (attempt ${attempt + 1})`);
       }
     } catch (err) {
       const msg = (err as Error).message;
@@ -392,12 +395,13 @@ export class MlScraperService {
       // Transient network error (DNS hiccup, TCP reset, TLS handshake glitch).
       // The request never reached Decodo, so a retry is free. Single retry —
       // a second failure indicates a real outage and gets fed to the breaker.
-      if (!retried) {
+      if (attempt < 1) {
+        const delay = backoffMs(attempt, this.config.decodoRetryBackoffBaseMs);
         this.logger.warn(
-          `Decodo fetch failed for ${targetUrl}${causeStr}: ${msg} — retrying in 1s`,
+          `Decodo fetch failed for ${targetUrl}${causeStr}: ${msg} — retrying in ${delay}ms`,
         );
-        await sleep(1000);
-        return this.postScrapeInner(body, true);
+        await sleep(delay);
+        return this.postScrapeInner(body, attempt + 1);
       }
       this.logger.error(
         `Decodo fetch failed for ${targetUrl}${causeStr}: ${msg} — giving up after retry`,
@@ -410,24 +414,31 @@ export class MlScraperService {
       };
     }
 
-    // 429 = plan rate cap; backoff briefly and retry once. Not billed.
-    if (res.status === 429 && !retried) {
-      await sleep(1000);
-      return this.postScrapeInner(body, true);
-    }
-
     if (!res.ok) {
       const text = await res.text().catch(() => '');
-      // Transient Decodo-side failures — HTTP 400 "Something went wrong. Please
-      // try again later" bursts and 5xx gateway errors — clear on a retry.
-      // Back off and retry once. Account errors (401/402/403) are permanent and
-      // handled by the caller, so they are never retried here.
-      if (!retried && !isDecodoAccountError(res.status)) {
-        this.logger.warn(
-          `Decodo HTTP ${res.status} for ${targetUrl}: ${text.slice(0, 120)} — retrying in 1s`,
-        );
-        await sleep(1000);
-        return this.postScrapeInner(body, true);
+      // Account errors (401/402/403) are permanent — never retried; the caller
+      // throws DecodoAccountError and aborts the run. Everything else here is a
+      // transient Decodo-side failure that is NOT billed (a `status: "failed"`
+      // envelope or a 5xx gateway error), so retrying it is free:
+      //   - HTTP 400 "Something went wrong. Please try again later" bursts and
+      //     5xx gateway errors get the full budget (decodoTransientMaxRetries,
+      //     default 10) — both were observed lasting many seconds in the field
+      //     (notably MCO) and clear on their own.
+      //   - 429 (rate cap) gets a single retry; hammering a rate cap won't clear
+      //     it — our own sliding-window limiter is the real guard.
+      // If every retry is exhausted the result still carries `error`, which
+      // postScrape() counts as a hard failure toward the circuit breaker.
+      if (!isDecodoAccountError(res.status)) {
+        const maxRetries = res.status === 429 ? 1 : this.config.decodoTransientMaxRetries;
+        if (attempt < maxRetries) {
+          const delay = backoffMs(attempt, this.config.decodoRetryBackoffBaseMs);
+          this.logger.warn(
+            `Decodo HTTP ${res.status} for ${targetUrl}: ${text.slice(0, 120)} — ` +
+              `retry ${attempt + 1}/${maxRetries} in ${delay}ms`,
+          );
+          await sleep(delay);
+          return this.postScrapeInner(body, attempt + 1);
+        }
       }
       return {
         content: '',
@@ -472,6 +483,19 @@ export class MlScraperService {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+// Hard ceiling on a single backoff delay. With a base of 3 s and a budget of 10
+// retries the raw exponential would reach ~25 min on the last attempt; the cap
+// keeps the worst-case per-URL wait bounded (3+6+12+24+30×6 ≈ 3.75 min).
+const RETRY_BACKOFF_MAX_MS = 30_000;
+
+// Exponential backoff between transient-failure retries: baseMs · 2^attempt,
+// capped at RETRY_BACKOFF_MAX_MS. attempt is 0-based (0 → baseMs for the first
+// retry). Backing off (rather than retrying instantly) gives a transient Decodo
+// glitch time to clear before we spend another attempt on it.
+function backoffMs(attempt: number, baseMs: number): number {
+  return Math.min(baseMs * 2 ** attempt, RETRY_BACKOFF_MAX_MS);
 }
 
 /**

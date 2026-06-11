@@ -10,6 +10,8 @@ export interface AppConfig {
   mlBaseUrl: string;
   decodoApiToken: string;
   decodoRateLimitPerSec: number;
+  decodoTransientMaxRetries: number;
+  decodoRetryBackoffBaseMs: number;
   scraperMaxConcurrent: number;
   scraperFailureThreshold: number;
   scraperFailureDumpDir: string;
@@ -80,6 +82,22 @@ export default registerAs(
       mlBaseUrl: process.env.ML_BASE_URL ?? 'https://api.mercadolibre.com',
       decodoApiToken: process.env.DECODO_API_TOKEN ?? '',
       decodoRateLimitPerSec: parseInt(process.env.DECODO_RATE_LIMIT_PER_SEC ?? '10', 10),
+      // How many times to retry a transient Decodo-side soft failure — HTTP 400
+      // "Something went wrong. Please try again later" bursts. These are NOT
+      // billed (status: "failed"), so retrying is free; default 10 to ride out
+      // the multi-second bursts seen in the field (notably MCO). 5xx gateway
+      // errors are capped at a single retry separately so the circuit breaker
+      // still trips promptly on a real outage.
+      decodoTransientMaxRetries: Math.max(
+        0,
+        parseInt(process.env.DECODO_TRANSIENT_MAX_RETRIES ?? '10', 10),
+      ),
+      // Base delay for the exponential backoff between transient-failure retries:
+      // baseMs, 2×, 4×, … (capped in the scraper). Default 3 s.
+      decodoRetryBackoffBaseMs: Math.max(
+        0,
+        parseInt(process.env.DECODO_RETRY_BACKOFF_BASE_MS ?? '3000', 10),
+      ),
       scraperMaxConcurrent: Math.max(1, parseInt(process.env.SCRAPER_MAX_CONCURRENT ?? '10', 10)),
       scraperFailureThreshold: Math.max(1, parseInt(process.env.SCRAPER_FAILURE_THRESHOLD ?? '10', 10)),
       scraperFailureDumpDir: process.env.SCRAPER_FAILURE_DUMP_DIR ?? 'tmp/scraper-failures',

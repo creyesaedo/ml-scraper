@@ -38,6 +38,8 @@ function makeService(overrides: Partial<any> = {}) {
   const config = {
     decodoApiToken: 'token',
     decodoRateLimitPerSec: 1000,
+    decodoTransientMaxRetries: 10,
+    decodoRetryBackoffBaseMs: 1, // keep retries near-instant in tests
     scraperRetryPartialRender: true,
     ...overrides,
   } as any;
@@ -165,6 +167,87 @@ describe('MlScraperService', () => {
     const res = await service.scrapeCategoryWithProducts('MLC', 'MLC1', 4);
 
     expect(catCalls).toBe(2); // first 400 was retried and the retry succeeded
+    expect(res.products).toHaveLength(1);
+  });
+
+  it('rides out a sustained Decodo 400 burst, retrying up to the configured max', async () => {
+    // maxRetries = 3 → up to 4 attempts total. Fail the first 3, succeed on the 4th.
+    const { service } = makeService({ decodoTransientMaxRetries: 3 });
+    let catCalls = 0;
+    fetchMock.mockImplementation((_url: string, opts: any) => {
+      const target = JSON.parse(opts.body).url as string;
+      if (target.includes('/mas-vendidos/')) {
+        catCalls += 1;
+        if (catCalls < 4) {
+          return Promise.resolve({
+            ok: false,
+            status: 400,
+            json: async () => ({}),
+            text: async () => '{"status":"failed","message":"Something went wrong"}',
+          });
+        }
+        return Promise.resolve(decodoResponse({ content: CATEGORY_HTML }));
+      }
+      return Promise.resolve(decodoResponse({ content: PRODUCT_HTML }));
+    });
+
+    const res = await service.scrapeCategoryWithProducts('MLC', 'MLC1', 4);
+
+    expect(catCalls).toBe(4); // 1 initial + 3 retries, last one recovered
+    expect(res.products).toHaveLength(1);
+  });
+
+  it('gives up after exhausting the 400 retry budget and counts it as a breaker failure', async () => {
+    // maxRetries = 2 → 3 attempts, all 400 → category degrades to 0 products and
+    // the exhausted URL is reported to the circuit breaker.
+    const { service, health } = makeService({ decodoTransientMaxRetries: 2 });
+    let catCalls = 0;
+    fetchMock.mockImplementation((_url: string, opts: any) => {
+      const target = JSON.parse(opts.body).url as string;
+      if (target.includes('/mas-vendidos/')) {
+        catCalls += 1;
+      }
+      return Promise.resolve({
+        ok: false,
+        status: 400,
+        json: async () => ({}),
+        text: async () => '{"status":"failed","message":"Something went wrong"}',
+      });
+    });
+
+    const res = await service.scrapeCategoryWithProducts('MLC', 'MLC1', 4);
+
+    expect(catCalls).toBe(3); // 1 initial + 2 retries, then gives up
+    expect(res.products).toHaveLength(0);
+    // The URL failed every retry → one strike on the circuit breaker.
+    expect(health.reportFailure).toHaveBeenCalled();
+    expect(health.reportSuccess).not.toHaveBeenCalled();
+  });
+
+  it('retries a 5xx gateway error up to the transient budget too (not billed)', async () => {
+    // maxRetries = 3 → fail the first 3 with 502, recover on the 4th attempt.
+    const { service } = makeService({ decodoTransientMaxRetries: 3 });
+    let catCalls = 0;
+    fetchMock.mockImplementation((_url: string, opts: any) => {
+      const target = JSON.parse(opts.body).url as string;
+      if (target.includes('/mas-vendidos/')) {
+        catCalls += 1;
+        if (catCalls < 4) {
+          return Promise.resolve({
+            ok: false,
+            status: 502,
+            json: async () => ({}),
+            text: async () => 'Bad Gateway',
+          });
+        }
+        return Promise.resolve(decodoResponse({ content: CATEGORY_HTML }));
+      }
+      return Promise.resolve(decodoResponse({ content: PRODUCT_HTML }));
+    });
+
+    const res = await service.scrapeCategoryWithProducts('MLC', 'MLC1', 4);
+
+    expect(catCalls).toBe(4); // 1 initial + 3 retries, last one recovered
     expect(res.products).toHaveLength(1);
   });
 

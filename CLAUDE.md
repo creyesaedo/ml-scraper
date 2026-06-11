@@ -258,7 +258,14 @@ HTTP-only — no headless browser runs in our container. For each URL (category 
 - `headless: html` without JS rendering returns the PoW challenge page (~5–11 KB). ML's anti-bot validates TLS fingerprint, HTTP/2 frame ordering, and the runtime `window.snoopy.track('/anubis')` JS signal — only Decodo's premium + headless solver passes.
 - `browser_actions` chain works around a Decodo-side bug: ML pages use streaming SSR (React Server Components). Decodo's renderer sometimes captures HTML before all chunks arrive, returning only the `<head>` (~5–11 KB) with a 200 status. The chain forces (a) a hard 4 s pause for streaming to complete, (b) `scroll_to_bottom` to trigger lazy-hydration sections, (c) `wait_for_element` to verify the price block is in the DOM. With this chain, validation runs hit 100 % success across two verticals (tools + electronics); without it, 5–10 % of requests came back head-only.
 
-**Rate limiter:** sliding-window, capped at `DECODO_RATE_LIMIT_PER_SEC` (default 10, the Free/$19 plan ceiling). At real concurrency (8) and ~14 s per request, the effective rate is ~0.6 req/s — the limiter rarely binds. It is defensive against future concurrency increases or burst patterns. Transient Decodo responses get a 1 s backoff + single retry in `postScrapeInner`: HTTP `429` (rate cap, not billed) **and** Decodo-side `400` ("Something went wrong. Please try again later") / `5xx` gateway-error bursts — observed in the field, especially on MCO. Account errors (`401`/`402`/`403`) are permanent and never retried. Note: this retry reduces single-request loss but does **not** feed the circuit breaker, so a *sustained* Decodo 400 outage would still churn categories to 0 products without tripping the breaker.
+**Rate limiter:** sliding-window, capped at `DECODO_RATE_LIMIT_PER_SEC` (default 10, the Free/$19 plan ceiling). At real concurrency (8) and ~14 s per request, the effective rate is ~0.6 req/s — the limiter rarely binds. It is defensive against future concurrency increases or burst patterns. Transient Decodo responses get an **exponential backoff** retry in `postScrapeInner` (`DECODO_RETRY_BACKOFF_BASE_MS` · 2^attempt, default base 3 s, capped at 30 s/attempt), with the retry budget split by failure class:
+- Decodo-side `400` ("Something went wrong. Please try again later") bursts **and** `5xx` gateway errors retry up to `DECODO_TRANSIENT_MAX_RETRIES` times (default **10**). Both are **not billed** (`400` is a `status: "failed"` envelope; `5xx`/`524`/`613` are never billed per Decodo docs), so retrying is free, and both were observed lasting many seconds in the field (especially MCO). Without a generous budget a *sustained* 400 burst would churn whole categories to 0 products.
+- HTTP `429` (rate cap, not billed) keeps a **single** retry — hammering a rate cap won't clear it; the sliding-window limiter is the real guard.
+- Network errors (DNS/TCP/TLS) keep a **single** retry — a second failure indicates a real outage.
+
+Account errors (`401`/`402`/`403`) are permanent and never retried.
+
+**A URL that exhausts its whole retry budget counts as one hard failure for the circuit breaker.** The final result still carries an `error`, and `postScrape()` flags any errored result as a hard failure (alongside target `613`/`5xx`). So a sustained Decodo outage — 400 *or* 5xx — eventually trips the breaker and aborts the run: each fully-failed URL is one strike toward `SCRAPER_FAILURE_THRESHOLD`. Partial renders (0b) and expected target `4xx` (no /mas-vendidos page) come back **without** an `error`, so they stay off the counter as before. Note: because retries are internal, the breaker only sees the failure *after* the budget is spent, so with a base of 3 s and 10 retries each strike can take up to ~3.75 min — the breaker is thorough rather than fast.
 
 **Billing-aware error handling:** by Decodo's response-code rules, `200`/`204` always bill, `4xx` with non-empty body bills, but `500`/`524`/`613` ("failed to scrape") do not. A partial render (HTML <50 KB with a 200 status) is retried **once** by `scrapeWithWait` (controlled by `SCRAPER_RETRY_PARTIAL_RENDER`, default on); if the retry is still partial, the page degrades to `EMPTY_ENRICHMENT`. Each retry is an extra billed request, which is why it is bounded to one and only triggers on partial renders — hard failures (`5xx`/`613`) and expected `4xx` (no /mas-vendidos page) are never retried.
 
@@ -427,12 +434,14 @@ Configure via `SCRAPER_MAX_CONCURRENT` (env). Set to 1 to fully serialize, or hi
 
 ### Circuit breaker (`ScraperHealthService`)
 
-Tracks **consecutive hard failures**. A hard failure is:
-- Network error (DNS, TCP, timeout)
-- Decodo HTTP 5xx (gateway error)
+Tracks **consecutive hard failures**. A hard failure is any request that still carries an `error` after `postScrapeInner` exhausted its retry budget:
+- Network error (DNS, TCP, timeout) — after its single retry
+- Decodo HTTP `400`/`429`/`5xx` — after the full transient budget (`DECODO_TRANSIENT_MAX_RETRIES` for 400/5xx, single retry for 429) is spent
 - Decodo `target_status` 5xx or 613 ("failed to scrape" — not billed)
 
-NOT a hard failure (do not increment the counter): HTML <50 KB partial renders (returned as `EMPTY_ENRICHMENT`), product pages with no `catalog_id`, categories with no `/mas-vendidos` page.
+Because retries are internal, the breaker only sees the failure once the budget is spent — so each strike represents a URL that failed *every* attempt, not a single bad request.
+
+NOT a hard failure (do not increment the counter): HTML <50 KB partial renders (returned as `EMPTY_ENRICHMENT`), product pages with no `catalog_id`, categories with no `/mas-vendidos` page (expected target `4xx`). These all come back without an `error`.
 
 When the counter reaches `SCRAPER_FAILURE_THRESHOLD` (default 10):
 1. `tripped = true` is set; every subsequent `assertOpen()` throws `CircuitBreakerOpenError`.
@@ -476,6 +485,8 @@ Defined in `src/config/app.config.ts`, read from `.env`:
 | `ML_BASE_URL` | `https://api.mercadolibre.com` | ML API base URL |
 | `DECODO_API_TOKEN` | `""` | Decodo Web Scraping API token (base64). Required. |
 | `DECODO_RATE_LIMIT_PER_SEC` | `10` | Plan req/s cap: Free/$19=10, $49=25, $99=50, $249=100, $499=150, $999+=200. Sliding-window limiter caps `acquire()` calls. |
+| `DECODO_TRANSIENT_MAX_RETRIES` | `10` | How many times to retry a transient, **not-billed** Decodo-side failure — HTTP `400` ("Something went wrong. Please try again later") soft failures **and** `5xx` gateway errors. Retrying is free; the high default rides out the multi-second bursts seen on MCO. A URL that exhausts the budget counts as one circuit-breaker strike. Does **not** apply to `429`/network errors (single retry each) or account errors (`401`/`402`/`403`, never retried). Set to `0` to disable. |
+| `DECODO_RETRY_BACKOFF_BASE_MS` | `3000` | Base delay for the exponential backoff between transient retries: `base · 2^attempt` (3 s, 6 s, 12 s, …), capped at 30 s per attempt. Applies to all retry classes (400/5xx/429/network). |
 | `SCRAPER_MAX_CONCURRENT` | `10` | Hard cap on parallel scraper requests. Prevents the outer p-limits (3×8=24) from blowing past Decodo's plan rate. |
 | `SCRAPER_FAILURE_THRESHOLD` | `10` | Consecutive hard failures before the circuit breaker trips, aborts the sync, and dumps diagnostics. |
 | `SCRAPER_FAILURE_DUMP_DIR` | `tmp/scraper-failures` | Directory (relative to cwd) where the breaker writes `error.log`, `sample.html`, `context.json` on trip. |
