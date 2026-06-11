@@ -479,6 +479,7 @@ export class ProductCollectionService {
             const snapshotRows = enriched.map((p) => ({
               name: p.name,
               price: p.price,
+              url: p.product_url,
               country: siteId,
               category_id: p.category_id,
               parent_id: p.parent_id,

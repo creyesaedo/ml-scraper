@@ -42,6 +42,7 @@ model Product {
   id            Int       @id @default(autoincrement())
   name          String    @db.VarChar(500)
   price         Decimal   @db.Decimal(14, 2)
+  url           String?   @db.VarChar(1000)
   country       String?   @db.VarChar(10)
   category_id   Int
   parent_id     Int?
