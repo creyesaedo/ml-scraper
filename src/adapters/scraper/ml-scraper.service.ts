@@ -51,6 +51,13 @@ const PRODUCT_WAIT_SELECTOR = '.ui-pdp-price';
 // 8s to paint the price/listing block (it rendered fully at 15s in testing).
 const WAIT_FOR_ELEMENT_TIMEOUT_S = 15;
 
+// Extra attempts when Decodo returns a render failure (target_status 613 "failed
+// to scrape" or a 5xx from the target). These are transient — a heavy category
+// page that 613s under concurrent load renders fine on the next attempt — and,
+// crucially, Decodo does NOT bill them, so retrying is free. Bounded to keep a
+// genuine sustained outage from spinning (it still reaches the circuit breaker).
+const RENDER_FAILURE_MAX_RETRIES = 2;
+
 type DecodoActions = Array<
   | { type: 'wait'; wait_time_s: number }
   | { type: 'scroll_to_bottom'; timeout_s: number }
@@ -58,6 +65,7 @@ type DecodoActions = Array<
       type: 'wait_for_element';
       selector: { type: 'css'; value: string };
       timeout_s: number;
+      on_error?: 'skip' | 'error';
     }
 >;
 
@@ -75,7 +83,8 @@ interface DecodoScrapeResult {
  * request chains `wait` → `scroll_to_bottom` → `wait_for_element`.
  *
  * Sliding-window rate limiter caps starts at `decodoRateLimitPerSec`; 429
- * responses get a single 1-second backoff retry (not billed).
+ * responses get a single backoff retry (a 429 bills when its body is non-empty,
+ * per Decodo's response-codes table — the limiter, not the retry, is the guard).
  */
 @Injectable()
 export class MlScraperService {
@@ -125,12 +134,23 @@ export class MlScraperService {
       this.logger.error(`[${siteId}] Error scraping category ${categoryMlId}: ${catRes.error}`);
       return { products: [], enrichmentsByUrl };
     }
-    // A 4xx from the target (typically 404) means this category has no
-    // /mas-vendidos page — a known, expected case, not a render failure.
-    if (catRes.targetStatus && catRes.targetStatus >= 400) {
+    // A genuine 4xx from the target (typically 404) means this category has no
+    // /mas-vendidos page — a known, expected case, not a render failure. Note:
+    // 613 ("Decodo failed to scrape") and 5xx are NOT in this range — they are
+    // transient render failures (already retried for free in scrapeWithWait) and
+    // must NOT be misread as "no page", or a heavy category that 613s under load
+    // gets silently dropped with 0 products every run.
+    if (catRes.targetStatus && catRes.targetStatus >= 400 && catRes.targetStatus < 500) {
       this.logger.warn(
         `[${siteId}] Category ${categoryMlId} has no /mas-vendidos page ` +
           `(HTTP ${catRes.targetStatus} at ${url}) — skipping, 0 products`,
+      );
+      return { products: [], enrichmentsByUrl };
+    }
+    if (catRes.targetStatus && catRes.targetStatus >= 500) {
+      this.logger.warn(
+        `[${siteId}] Category ${categoryMlId} render failed after retries ` +
+          `(target ${catRes.targetStatus} at ${url}) — 0 products this run (transient, not blacklisted)`,
       );
       return { products: [], enrichmentsByUrl };
     }
@@ -209,6 +229,10 @@ export class MlScraperService {
     const url = categoryUrl(siteId, categoryMlId);
     const res = await this.scrapeWithWait(url, siteId, CATEGORY_WAIT_SELECTOR);
     if (res.error) return 'failed';
+    // 613/5xx are transient render failures (already retried in scrapeWithWait),
+    // not a missing page — return 'failed' so a glitch never blacklists a real
+    // category. Only a genuine 4xx (404/410) means the page truly does not exist.
+    if (res.targetStatus && res.targetStatus >= 500) return 'failed';
     if (res.targetStatus && res.targetStatus >= 400) return 'no_page';
     if (res.content.length < PARTIAL_PAGE_THRESHOLD) return 'failed';
     return parseCategoryHtml(res.content).length > 0 ? 'has_products' : 'empty';
@@ -262,7 +286,23 @@ export class MlScraperService {
     siteId: string,
     waitSelector: string,
   ): Promise<DecodoScrapeResult> {
-    const result = await this.postScrape(this.buildScrapeBody(url, siteId, waitSelector));
+    let result = await this.postScrape(this.buildScrapeBody(url, siteId, waitSelector));
+
+    // Render failures (target_status 613 "failed to scrape" or a 5xx from the
+    // target through Decodo) are transient and NOT billed, so retry them for
+    // free before giving up. They come back WITHOUT `result.error` (that field
+    // is only set on Decodo-HTTP / network failures), so the partial-render
+    // check below would never catch them — they would instead fall through and,
+    // for a category page, be misread as "no /mas-vendidos page" and dropped
+    // with 0 products. A heavy ML category page that 613s under concurrent load
+    // routinely renders on the next attempt.
+    for (let attempt = 0; attempt < RENDER_FAILURE_MAX_RETRIES && isRenderFailure(result); attempt++) {
+      this.logger.warn(
+        `[${siteId}] Render failure (target ${result.targetStatus}) for ${url} — ` +
+          `retrying free, attempt ${attempt + 1}/${RENDER_FAILURE_MAX_RETRIES}`,
+      );
+      result = await this.postScrape(this.buildScrapeBody(url, siteId, waitSelector));
+    }
 
     if (this.config.scraperRetryPartialRender && this.isPartialRender(result)) {
       this.logger.warn(
@@ -295,6 +335,13 @@ export class MlScraperService {
           type: 'wait_for_element',
           selector: { type: 'css', value: waitSelector },
           timeout_s: WAIT_FOR_ELEMENT_TIMEOUT_S,
+          // If the selector never appears within the timeout, return the HTML
+          // rendered so far instead of failing the whole scrape. Without this,
+          // a heavy ML page where the element is slow to paint aborts into an
+          // empty body / 613 (and Decodo burns a long internal retry loop —
+          // ~132 s observed); with it, the full page that did render is kept.
+          // Validated on the MCO categories that 613'd under the default.
+          on_error: 'skip',
         },
       ] satisfies DecodoActions,
     };
@@ -418,14 +465,18 @@ export class MlScraperService {
       const text = await res.text().catch(() => '');
       // Account errors (401/402/403) are permanent — never retried; the caller
       // throws DecodoAccountError and aborts the run. Everything else here is a
-      // transient Decodo-side failure that is NOT billed (a `status: "failed"`
-      // envelope or a 5xx gateway error), so retrying it is free:
-      //   - HTTP 400 "Something went wrong. Please try again later" bursts and
-      //     5xx gateway errors get the full budget (decodoTransientMaxRetries,
-      //     default 10) — both were observed lasting many seconds in the field
-      //     (notably MCO) and clear on their own.
-      //   - 429 (rate cap) gets a single retry; hammering a rate cap won't clear
-      //     it — our own sliding-window limiter is the real guard.
+      // transient Decodo-side failure that we retry. Billing per Decodo's
+      // response-codes table (help.decodo.com/docs/web-scraping-api-response-codes):
+      //   - 5xx gateway errors are NEVER billed — get the full retry budget
+      //     (decodoTransientMaxRetries, default 10); observed lasting many
+      //     seconds in the field (notably MCO) and clear on their own.
+      //   - HTTP 400 "Something went wrong. Please try again later" bursts ARE
+      //     billed when the body is non-empty (it's a 4xx). We still retry the
+      //     full budget because the alternative is 0 products, but be aware each
+      //     400 attempt with a non-empty body costs a request.
+      //   - 429 (rate cap) is billed when the body is non-empty (a 4xx). It gets
+      //     a single retry only; hammering a rate cap won't clear it — our own
+      //     sliding-window limiter is the real guard.
       // If every retry is exhausted the result still carries `error`, which
       // postScrape() counts as a hard failure toward the circuit breaker.
       if (!isDecodoAccountError(res.status)) {
@@ -499,10 +550,29 @@ function backoffMs(attempt: number, baseMs: number): number {
 }
 
 /**
+ * True for a transient render failure surfaced inside a successful Decodo HTTP
+ * envelope: a target_status of 613 ("Decodo failed to scrape") or a 5xx from the
+ * target. These carry no `result.error` (that is reserved for Decodo-HTTP /
+ * network failures) and are NOT billed, so they are safe and free to retry.
+ * Mirrors the hard-failure classification in `postScrape`.
+ */
+function isRenderFailure(res: DecodoScrapeResult): boolean {
+  if (res.error) return false;
+  const s = res.targetStatus;
+  return s === 613 || (typeof s === 'number' && s >= 500 && s < 600);
+}
+
+/**
  * True for Decodo HTTP statuses that signal an account problem rather than a
- * per-request failure: 401 (bad/expired token), 402 (out of balance / payment
- * required), 403 (forbidden). Retrying or scraping other URLs cannot recover
- * from these, so they abort the whole run.
+ * per-request failure. Retrying or scraping other URLs cannot recover from
+ * these, so they abort the whole run.
+ *
+ * Per Decodo's official response-codes table
+ * (https://help.decodo.com/docs/web-scraping-api-response-codes) the documented
+ * account-level codes are 401 (bad/expired token) and 403 (no access to the
+ * resource); both bill if the response body is non-empty. 402 ("out of balance /
+ * payment required") is NOT in that table — it is kept here defensively in case
+ * Decodo returns it for an empty wallet, but treat it as unverified.
  */
 function isDecodoAccountError(decodoStatus: number): boolean {
   return decodoStatus === 401 || decodoStatus === 402 || decodoStatus === 403;

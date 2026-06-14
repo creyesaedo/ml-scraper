@@ -186,7 +186,7 @@ export function parseCategoryHtml(html: string): ScrapedProduct[] {
         .replace(/\./g, '');
 
       const href = $(el).find('a.poly-component__title').attr('href') ?? '';
-      const catalogMatch = href.match(/\/p\/(ML[A-Z][0-9]+)/);
+      const catalogMatch = href.match(/\/p\/(M[A-Z]{2}[0-9]+)/);
 
       if (name) {
         products.push({
@@ -241,11 +241,11 @@ export function parseProductPageHtml(html: string): ProductEnrichment {
   if (dateMatch) date_created_from_page = dateMatch[1];
 
   let catalog_product_id_from_page: string | null = null;
-  const catalogPidMatch = html.match(/"catalogProductId"\s*:\s*"(ML[A-Z][0-9]+)"/);
+  const catalogPidMatch = html.match(/"catalogProductId"\s*:\s*"(M[A-Z]{2}[0-9]+)"/);
   if (catalogPidMatch) catalog_product_id_from_page = catalogPidMatch[1];
 
   let leaf_category_id: string | null = null;
-  const categoryIdMatch = html.match(/"categoryId"\s*:\s*"(ML[A-Z][0-9]+)"/);
+  const categoryIdMatch = html.match(/"categoryId"\s*:\s*"(M[A-Z]{2}[0-9]+)"/);
   if (categoryIdMatch) leaf_category_id = categoryIdMatch[1];
 
   // ML's per-listing "item ID" shown on the product page as "Publicación #NNNNNN".
@@ -255,7 +255,7 @@ export function parseProductPageHtml(html: string): ProductEnrichment {
   if (publicIdMatch) {
     ml_public_id = publicIdMatch[1];
   } else {
-    const itemIdMatch = html.match(/"item_id"\s*:\s*"ML[A-Z]?(\d{6,})"/);
+    const itemIdMatch = html.match(/"item_id"\s*:\s*"M[A-Z]{2}(\d{6,})"/);
     if (itemIdMatch) ml_public_id = itemIdMatch[1];
   }
 

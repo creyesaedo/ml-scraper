@@ -84,6 +84,19 @@ describe('ml-parsers', () => {
       expect(products[0].price).toBe('5000');
     });
 
+    // Regression: site prefixes that are not "ML*" (MCO Colombia, MPE Peru) must
+    // be captured too — the old /p/(ML[A-Z]...) regex missed them, leaving
+    // catalog_id null for those whole markets.
+    it('extracts catalog_id for non-ML site prefixes (MCO, MPE)', () => {
+      const html = `<ul>
+        ${item('Audífonos', 'https://www.mercadolibre.com.co/audifonos/p/MCO6344841', '90.000')}
+        ${item('Mochila', 'https://www.mercadolibre.com.pe/mochila/p/MPE123456', '50')}
+      </ul>`;
+      const products = parseCategoryHtml(html);
+      expect(products[0].catalog_id).toBe('MCO6344841');
+      expect(products[1].catalog_id).toBe('MPE123456');
+    });
+
     it('skips items with no name', () => {
       const html = `<li class="ui-search-layout__item">
         <a class="poly-component__title" href="/x/p/MLC1"></a>
@@ -182,6 +195,30 @@ describe('ml-parsers', () => {
       expect(e.seller_power_status).toBe('platinum');
       expect(e.seller_total_products).toBe(100);
       expect(e.seller_total_sales).toBe(5000);
+    });
+  });
+
+  describe('parseProductPageHtml — non-ML site prefixes (MCO, MPE)', () => {
+    // Regression: catalog_product_id, leaf_category_id and the item_id fallback
+    // all hardcoded an "ML" prefix, so they returned null for MCO/MPE — which
+    // collapsed catalog enrichment (and date_created, fetched via the catalog id)
+    // for those entire markets. Verified against a live MCO product page.
+    it('extracts MCO catalog product id, leaf category id and listing id', () => {
+      const html = [
+        '"catalogProductId":"MCO6344841"',
+        '"categoryId":"MCO3697"',
+        // no "Publicación #" → forces the item_id fallback path
+        '"item_id":"MCO3582113354"',
+      ].join(' ');
+      const e = parseProductPageHtml(html);
+      expect(e.catalog_product_id_from_page).toBe('MCO6344841');
+      expect(e.leaf_category_id).toBe('MCO3697');
+      expect(e.ml_public_id).toBe('3582113354');
+    });
+
+    it('extracts MPE catalog product id', () => {
+      const e = parseProductPageHtml('"catalogProductId":"MPE123456"');
+      expect(e.catalog_product_id_from_page).toBe('MPE123456');
     });
   });
 

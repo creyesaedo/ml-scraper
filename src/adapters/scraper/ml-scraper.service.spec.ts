@@ -132,6 +132,9 @@ describe('MlScraperService', () => {
       'scroll_to_bottom',
       'wait_for_element',
     ]);
+    // wait_for_element returns the rendered HTML instead of aborting on timeout.
+    const wfe = body.browser_actions.find((a: any) => a.type === 'wait_for_element');
+    expect(wfe.on_error).toBe('skip');
     expect(urlOf(fetchMock.mock.calls[0])).toContain('/mas-vendidos/MLC1');
   });
 
@@ -251,6 +254,39 @@ describe('MlScraperService', () => {
     expect(res.products).toHaveLength(1);
   });
 
+  it('retries a 613 render failure on the category page for free and recovers', async () => {
+    const { service } = makeService();
+    let catCalls = 0;
+    fetchMock.mockImplementation((_url: string, opts: any) => {
+      const target = JSON.parse(opts.body).url as string;
+      if (target.includes('/mas-vendidos/')) {
+        catCalls += 1;
+        // First attempt: Decodo "failed to scrape" (613, 200 envelope, not billed).
+        if (catCalls === 1) return Promise.resolve(decodoResponse({ targetStatus: 613, content: SMALL }));
+        return Promise.resolve(decodoResponse({ content: CATEGORY_HTML }));
+      }
+      return Promise.resolve(decodoResponse({ content: PRODUCT_HTML }));
+    });
+
+    const res = await service.scrapeCategoryWithProducts('MLC', 'MLC1', 4);
+
+    expect(catCalls).toBe(2); // 613 retried, retry rendered the page
+    expect(res.products).toHaveLength(1);
+  });
+
+  it('does NOT treat a persistent 613 as "no más-vendidos page" — render failure, not blacklisted', async () => {
+    const { service, health } = makeService();
+    // Every category attempt 613s. RENDER_FAILURE_MAX_RETRIES = 2 → 3 attempts.
+    fetchMock.mockResolvedValue(decodoResponse({ targetStatus: 613, content: SMALL }));
+
+    const res = await service.scrapeCategoryWithProducts('MLC', 'MLC1');
+
+    expect(res.products).toEqual([]); // 0 products this run, but as a render failure
+    expect(fetchMock).toHaveBeenCalledTimes(3); // 1 initial + 2 free retries
+    // A 613 is a hard failure for the breaker (unlike a genuine 4xx "no page").
+    expect(health.reportFailure).toHaveBeenCalled();
+  });
+
   it('does not retry an account-level Decodo error (401/402/403) — fails fast', async () => {
     const { service } = makeService();
     fetchMock.mockResolvedValue(decodoResponse({ status: 403 }));
@@ -293,6 +329,13 @@ describe('MlScraperService', () => {
       const { service } = makeService();
       fetchMock.mockResolvedValue(decodoResponse({ targetStatus: 200, content: SMALL }));
       expect(await service.probeCategoryBestSellers('MLC', 'MLC1')).toBe('failed');
+    });
+
+    it('returns failed (not no_page) on a persistent 613 — never blacklists a real category', async () => {
+      const { service } = makeService();
+      fetchMock.mockResolvedValue(decodoResponse({ targetStatus: 613, content: SMALL }));
+      expect(await service.probeCategoryBestSellers('MLC', 'MLC1')).toBe('failed');
+      expect(fetchMock).toHaveBeenCalledTimes(3); // retried for free before the verdict
     });
   });
 });
