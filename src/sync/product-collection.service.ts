@@ -365,8 +365,14 @@ export class ProductCollectionService {
       this.logger.log(`[${siteId}] Starting fresh sync_run ${syncRunId} (${remaining.length} categories)`);
     }
 
-    const categoryLimit = pLimit(3);
-    const productLimit = pLimit(8);
+    // Decodo-request parallelism. Effective in-flight = categoryConcurrency ×
+    // productConcurrency, then clamped by the global SCRAPER_MAX_CONCURRENT
+    // semaphore; DECODO_RATE_LIMIT_PER_SEC paces the actual req/s. Raise all
+    // three together to use a higher plan rate (see app.config.ts). Defaults 3/8.
+    const categoryConcurrency = this.configService.get<number>('app.categoryConcurrency') ?? 3;
+    const productConcurrency = this.configService.get<number>('app.productConcurrency') ?? 8;
+    const categoryLimit = pLimit(categoryConcurrency);
+    const productLimit = pLimit(productConcurrency);
     const holidayName = await this.holidays.getHolidayName(snapshotDate, siteId);
 
     // Resolve the FX rate once per run (collect() is per-site = one currency).
@@ -401,7 +407,7 @@ export class ProductCollectionService {
             await this.markCategoryInProgress(syncRunId, rootCat.ml_id);
             this.logger.log(`[${siteId}] Starting category ${rootCat.ml_id}`);
             const { products: scraped, enrichmentsByUrl } =
-              await this.scraper.scrapeCategoryWithProducts(siteId, rootCat.ml_id, 8);
+              await this.scraper.scrapeCategoryWithProducts(siteId, rootCat.ml_id, productConcurrency);
 
             if (!scraped.length) {
               errors.push(`${rootCat.ml_id}: no results`);

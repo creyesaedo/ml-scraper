@@ -13,6 +13,8 @@ export interface AppConfig {
   decodoTransientMaxRetries: number;
   decodoRetryBackoffBaseMs: number;
   scraperMaxConcurrent: number;
+  categoryConcurrency: number;
+  productConcurrency: number;
   scraperFailureThreshold: number;
   scraperFailureDumpDir: string;
   scraperRetryPartialRender: boolean;
@@ -72,6 +74,38 @@ export default registerAs(
     // gets its random pick injected by the CLI before collect() runs.
     const snapshotCategoriesBySite: Record<string, string[]> = {};
 
+    // ── Auto-sized scraper concurrency ──────────────────────────────────────
+    // The single knob the operator sets is DECODO_RATE_LIMIT_PER_SEC (the plan's
+    // req/s cap). Everything below auto-derives from it so concurrency never has
+    // to be hand-tuned. The rate limiter remains the precise pacer; the pool just
+    // has to be big enough to *reach* that rate.
+    //
+    // Little's law: to sustain `rate` request-starts/s when each request occupies
+    // a slot for `seconds`, you need `rate × seconds` requests in flight. At 25
+    // req/s × ~15 s that's ~375 — NOT 25. A pool capped at 25 would only yield
+    // ~25/15 ≈ 1.7 req/s and leave the plan almost unused.
+    const decodoRateLimitPerSec = Math.max(1, parseInt(process.env.DECODO_RATE_LIMIT_PER_SEC ?? '10', 10));
+    // Avg seconds a Decodo request holds a slot (4 s wait + scroll + render, plus
+    // it stays held through internal retries). Tune via env only if your observed
+    // per-request latency differs a lot from the ~14–15 s default.
+    const decodoSecondsPerRequest = Math.max(1, parseInt(process.env.DECODO_AVG_REQUEST_SECONDS ?? '15', 10));
+    // Global in-flight pool. Auto = rate × seconds (saturates the rate limit).
+    // SCRAPER_MAX_CONCURRENT, when set, overrides the auto value as a hard ceiling.
+    const autoConcurrency = Math.ceil(decodoRateLimitPerSec * decodoSecondsPerRequest);
+    const scraperMaxConcurrent = process.env.SCRAPER_MAX_CONCURRENT
+      ? Math.max(1, parseInt(process.env.SCRAPER_MAX_CONCURRENT, 10))
+      : autoConcurrency;
+    // Product pages flow freely into the global pool (no inner throttle below it).
+    const productConcurrency = process.env.PRODUCT_CONCURRENCY
+      ? Math.max(1, parseInt(process.env.PRODUCT_CONCURRENCY, 10))
+      : scraperMaxConcurrent;
+    // Categories unlocked in parallel — only enough to keep the product backlog
+    // full (each category yields ~20 product requests), bounded so we don't fire
+    // hundreds of checkpoint DB writes at once. ~pool/12 with a floor of 3.
+    const categoryConcurrency = process.env.CATEGORY_CONCURRENCY
+      ? Math.max(1, parseInt(process.env.CATEGORY_CONCURRENCY, 10))
+      : Math.max(3, Math.ceil(scraperMaxConcurrent / 12));
+
     return {
       appMode,
       databaseUrl:
@@ -81,7 +115,7 @@ export default registerAs(
       mlClientSecret: process.env.ML_CLIENT_SECRET ?? '',
       mlBaseUrl: process.env.ML_BASE_URL ?? 'https://api.mercadolibre.com',
       decodoApiToken: process.env.DECODO_API_TOKEN ?? '',
-      decodoRateLimitPerSec: parseInt(process.env.DECODO_RATE_LIMIT_PER_SEC ?? '10', 10),
+      decodoRateLimitPerSec,
       // How many times to retry a transient Decodo-side soft failure — HTTP 400
       // "Something went wrong. Please try again later" bursts. These are NOT
       // billed (status: "failed"), so retrying is free; default 10 to ride out
@@ -98,7 +132,9 @@ export default registerAs(
         0,
         parseInt(process.env.DECODO_RETRY_BACKOFF_BASE_MS ?? '3000', 10),
       ),
-      scraperMaxConcurrent: Math.max(1, parseInt(process.env.SCRAPER_MAX_CONCURRENT ?? '10', 10)),
+      scraperMaxConcurrent,
+      categoryConcurrency,
+      productConcurrency,
       scraperFailureThreshold: Math.max(1, parseInt(process.env.SCRAPER_FAILURE_THRESHOLD ?? '10', 10)),
       scraperFailureDumpDir: process.env.SCRAPER_FAILURE_DUMP_DIR ?? 'tmp/scraper-failures',
       // Retry a page once when Decodo returns a partial render (200 but body

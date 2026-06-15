@@ -116,7 +116,9 @@ TRIGGER: POST /sync/run/:siteId  OR  weekly cron (WeeklySyncJob)
                  ├─ SELECT all parent categories FROM categories table
                  │     WHERE parent_id IS NULL AND site_id = siteId
                  │
-                 └─ p-limit(3): process 3 categories in parallel
+                 └─ p-limit(CATEGORY_CONCURRENCY, auto): categories in parallel
+                    (all Decodo requests share one rate-limited pool of
+                     SCRAPER_MAX_CONCURRENT slots, auto-sized to the rate limit)
                          │
                          └─ Per category:
                              │
@@ -332,7 +334,7 @@ The best-sellers section slug is **language-specific**. Spanish sites use `/mas-
 The "+X mil vendidos" badge shown on product pages is not exposed through any ML API endpoint accessible with `client_credentials`. It is only available by scraping the product page HTML.
 
 ### Sync duration
-Each category requires 1 category page + up to 20 product page requests to Decodo (a best-sellers page lists **0–20** products — usually 20, but it can be as few as 1, or 0 when the section is empty) plus 0..20 ML API calls for `date_created` + 0..N ML API calls for leaf categories not yet in DB. With `p-limit(3)` on categories, a full 32-parent-category sync takes ~13 minutes per site. The cron trigger is still recommended over manual HTTP — runs unattended and never blocks the API.
+Each category requires 1 category page + up to 20 product page requests to Decodo (a best-sellers page lists **0–20** products — usually 20, but it can be as few as 1, or 0 when the section is empty) plus 0..20 ML API calls for `date_created` + 0..N ML API calls for leaf categories not yet in DB. With the rate-limited pool auto-sized to the plan rate, a full sync is paced almost entirely by `DECODO_RATE_LIMIT_PER_SEC`: wall-clock ≈ `total_requests / rate` plus a ~15 s ramp and tail. At 25 req/s a ~672-request single-site run is ~1 min, and Core 7 (~4,700 requests) is ~3–4 min — versus ~13 min/site under the old fixed `p-limit(3)`. Lower rates (e.g. 10 req/s on the Free tier) take proportionally longer; sustained transient bursts add overhead. The cron trigger is still recommended over manual HTTP — runs unattended and never blocks the API.
 
 ### Decodo head-only / streaming-SSR race
 Decodo's headless renderer occasionally returns the HTML before ML's streaming SSR (React Server Components) finishes hydrating the `<body>`. Symptom: response is 5–11 KB with a fully-populated `<head>` (real `<title>`, OG tags, csrf-token, traceparent) but no body. `targetStatus` is 200 so it looks successful, only the size betrays it. Affects both category and product URLs randomly (the same URL fails ~5–10 % of the time without mitigation, succeeds on retry).
@@ -434,9 +436,11 @@ Two safety mechanisms gate every scraper request.
 
 ### Global concurrency semaphore
 
-A single `p-limit(SCRAPER_MAX_CONCURRENT)` instance (default 10) lives in `ScraperModule` and is injected into `MlScraperService`. Every outbound request (category page or product page) acquires a slot before issuing the HTTP call and releases it on completion. The outer p-limits in `ProductCollectionService` (3 categories × 8 products = up to 24 in flight) are still there for batching, but the semaphore enforces the hard ceiling — so the Decodo Free/$19 plan's 10 req/s cap is never exceeded.
+A single `p-limit(SCRAPER_MAX_CONCURRENT)` instance lives in `ScraperModule` and is injected into `MlScraperService`. Every outbound request (category page or product page) acquires a slot before issuing the HTTP call and releases it on completion (held through internal retries). Together with the sliding-window rate limiter, this is the **flat request pool**: category and product requests compete for the same slots, and as one finishes the next pending request is admitted.
 
-Configure via `SCRAPER_MAX_CONCURRENT` (env). Set to 1 to fully serialize, or higher if you upgrade the Decodo plan.
+**Auto-sized to the rate limit.** `SCRAPER_MAX_CONCURRENT` is normally left unset and auto-derives from `DECODO_RATE_LIMIT_PER_SEC` via Little's law (`rate × DECODO_AVG_REQUEST_SECONDS`, ~375 at 25 req/s × 15 s). This makes the pool exactly big enough to *saturate* the plan's rate — capping the pool at the rate number (e.g. 25) would instead yield only ~`rate / seconds` ≈ 1.7 req/s. The rate limiter stays the precise pacer (never exceeds `DECODO_RATE_LIMIT_PER_SEC` starts/s); the pool just ensures enough requests are in flight to reach it. The outer p-limits in `ProductCollectionService` (`CATEGORY_CONCURRENCY` categories, `PRODUCT_CONCURRENCY` products each) also auto-size from the pool so they never bind below it.
+
+So the operator's single knob is `DECODO_RATE_LIMIT_PER_SEC` (the plan's req/s cap); everything else follows. Set `SCRAPER_MAX_CONCURRENT` explicitly only to impose a manual hard ceiling (e.g. `1` to fully serialize). **Caveat:** higher concurrency increases the rate of transient `400`/`613` bursts (notably MCO) — validate a new rate with `scripts/test-decodo.js` (`DECODO_TEST_CONCURRENCY`) before trusting a full production run; the circuit breaker is the backstop.
 
 ### Circuit breaker (`ScraperHealthService`)
 
@@ -493,7 +497,10 @@ Defined in `src/config/app.config.ts`, read from `.env`:
 | `DECODO_RATE_LIMIT_PER_SEC` | `10` | Plan req/s cap: Free/$19=10, $49=25, $99=50, $249=100, $499=150, $999+=200. Sliding-window limiter caps `acquire()` calls. |
 | `DECODO_TRANSIENT_MAX_RETRIES` | `10` | How many times to retry a transient, **not-billed** Decodo-side failure — HTTP `400` ("Something went wrong. Please try again later") soft failures **and** `5xx` gateway errors. Retrying is free; the high default rides out the multi-second bursts seen on MCO. A URL that exhausts the budget counts as one circuit-breaker strike. Does **not** apply to `429`/network errors (single retry each) or account errors (`401`/`402`/`403`, never retried). Set to `0` to disable. |
 | `DECODO_RETRY_BACKOFF_BASE_MS` | `3000` | Base delay for the exponential backoff between transient retries: `base · 2^attempt` (3 s, 6 s, 12 s, …), capped at 30 s per attempt. Applies to all retry classes (400/5xx/429/network). |
-| `SCRAPER_MAX_CONCURRENT` | `10` | Hard cap on parallel scraper requests. Prevents the outer p-limits (3×8=24) from blowing past Decodo's plan rate. |
+| `SCRAPER_MAX_CONCURRENT` | *auto* (`rate × DECODO_AVG_REQUEST_SECONDS`) | Global in-flight request pool (the semaphore every Decodo request passes through). **Leave unset** — it auto-sizes from the rate limit so the pool is exactly big enough to saturate `DECODO_RATE_LIMIT_PER_SEC` (Little's law: ~375 at 25 req/s × 15 s). Set it only to impose a manual hard ceiling. |
+| `DECODO_AVG_REQUEST_SECONDS` | `15` | Estimated seconds a Decodo request holds a pool slot (wait + scroll + render, held through internal retries). Only the auto-concurrency calc uses it; raise if your observed latency is higher. |
+| `CATEGORY_CONCURRENCY` | *auto* (`max(3, pool/12)`) | Optional override for parent categories unlocked in parallel. Auto value keeps the product backlog full without firing hundreds of checkpoint writes at once. |
+| `PRODUCT_CONCURRENCY` | *auto* (`= pool`) | Optional override for product pages in flight per category. Auto = pool, so products flow freely into the global pool with no inner throttle. |
 | `SCRAPER_FAILURE_THRESHOLD` | `10` | Consecutive hard failures before the circuit breaker trips, aborts the sync, and dumps diagnostics. |
 | `SCRAPER_FAILURE_DUMP_DIR` | `tmp/scraper-failures` | Directory (relative to cwd) where the breaker writes `error.log`, `sample.html`, `context.json` on trip. |
 | `SCRAPER_RETRY_PARTIAL_RENDER` | `true` | Retry a page once when Decodo returns a partial render (200 but HTML <50 KB). Set to `false` to skip the extra billed request and accept rows with null enrichment instead. |

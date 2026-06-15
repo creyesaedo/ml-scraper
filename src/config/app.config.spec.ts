@@ -84,11 +84,28 @@ describe('app.config', () => {
   });
 
   describe('numeric defaults and guards', () => {
-    it('uses default rate limit and concurrency', () => {
+    it('uses default rate limit and auto-sizes the concurrency pool from it', () => {
       const cfg = load();
       expect(cfg.decodoRateLimitPerSec).toBe(10);
-      expect(cfg.scraperMaxConcurrent).toBe(10);
+      // Auto pool = rate × DECODO_AVG_REQUEST_SECONDS (default 15) = 150.
+      expect(cfg.scraperMaxConcurrent).toBe(150);
+      // Products flow freely into the pool; categories are a bounded fraction.
+      expect(cfg.productConcurrency).toBe(150);
+      expect(cfg.categoryConcurrency).toBe(Math.ceil(150 / 12));
       expect(cfg.scraperFailureThreshold).toBe(10);
+    });
+    it('auto-sizes the pool to saturate a higher rate limit (Littles law)', () => {
+      process.env.DECODO_RATE_LIMIT_PER_SEC = '25';
+      const cfg = load();
+      expect(cfg.scraperMaxConcurrent).toBe(375); // 25 × 15
+      expect(cfg.productConcurrency).toBe(375);
+    });
+    it('honors an explicit SCRAPER_MAX_CONCURRENT override', () => {
+      process.env.DECODO_RATE_LIMIT_PER_SEC = '25';
+      process.env.SCRAPER_MAX_CONCURRENT = '40';
+      const cfg = load();
+      expect(cfg.scraperMaxConcurrent).toBe(40);
+      expect(cfg.productConcurrency).toBe(40);
     });
     it('clamps scraperMaxConcurrent to a minimum of 1', () => {
       process.env.SCRAPER_MAX_CONCURRENT = '0';

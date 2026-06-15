@@ -35,8 +35,12 @@ jobs:
       DECODO_API_TOKEN: ${{ secrets.DECODO_API_TOKEN }}
       ML_CLIENT_ID: ${{ secrets.ML_CLIENT_ID }}
       ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
-      DECODO_RATE_LIMIT_PER_SEC: '25'
-      SCRAPER_MAX_CONCURRENT: '24'
+      # The plan's req/s cap is the ONLY concurrency knob you set. The scraper
+      # auto-sizes its in-flight pool (SCRAPER_MAX_CONCURRENT, CATEGORY/PRODUCT_
+      # CONCURRENCY) from this via Little's law to saturate the rate. Do NOT pin
+      # SCRAPER_MAX_CONCURRENT here — a fixed value caps the pool below what's
+      # needed to reach the rate (~375 in flight at 25 req/s).
+      DECODO_RATE_LIMIT_PER_SEC: '20'
       SCRAPER_FAILURE_DUMP_DIR: 'tmp/scraper-failures'
       # Explicit: the in-process NestJS cron stays off — GitHub `schedule:` is the only trigger.
       ENABLE_INTERNAL_SCHEDULER: 'false'
