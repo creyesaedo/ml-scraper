@@ -23,24 +23,24 @@ function installProcessGuards(): void {
 }
 
 /**
- * HTTP server entry point. Creates the NestJS app, enables graceful shutdown so
- * DB connections close cleanly on exit, allows read-only (GET) CORS requests
- * from the portfolio frontend (any origin when PORTFOLIO_URL is unset), and
- * starts listening on PORT (defaults to 8000).
+ * HTTP server entry point for the scraper worker. Creates the NestJS app,
+ * enables graceful shutdown, and starts listening on PORT (defaults to 8001).
+ * The worker is an internal service called server-to-server by ml-service, so
+ * CORS allows the GET/POST verbs it serves.
  */
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create(AppModule);
   app.enableShutdownHooks();
-  // Catch-all filter: standardizes error responses, logs failures with context,
-  // and keeps raw Prisma/internal errors from leaking to clients.
+  // Catch-all filter: standardizes error responses and logs failures with
+  // context while passing structured scraper-abort payloads through to ml-service.
   app.useGlobalFilters(new AllExceptionsFilter(app.get(HttpAdapterHost)));
   app.enableCors({
     origin: process.env.PORTFOLIO_URL || '*',
-    methods: ['GET'],
+    methods: ['GET', 'POST'],
   });
-  const port = process.env.PORT ?? 8000;
+  const port = process.env.PORT ?? 8001;
   await app.listen(port);
-  logger.log(`Application running on port ${port}`);
+  logger.log(`Scraper worker running on port ${port}`);
 }
 
 installProcessGuards();

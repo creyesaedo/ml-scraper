@@ -116,6 +116,19 @@ export function currencyForSite(siteId: string): string | null {
   return SITE_CURRENCIES[siteId] ?? null;
 }
 
+/**
+ * Infers the siteId (e.g. "MLC") from a MercadoLibre product/category URL by
+ * matching its domain against SITE_DOMAINS. Returns null for unknown domains so
+ * the caller can require an explicit siteId. Used by the single-product worker
+ * endpoint, where only a URL is supplied.
+ */
+export function siteIdFromUrl(url: string): string | null {
+  for (const [site, domain] of Object.entries(SITE_DOMAINS)) {
+    if (url.includes(domain)) return site;
+  }
+  return null;
+}
+
 // 2-letter geo code used by Decodo's `geo` parameter, derived from siteId.
 export const SITE_GEO: Record<string, string> = {
   MLA: 'ar',
@@ -202,6 +215,28 @@ export function parseCategoryHtml(html: string): ScrapedProduct[] {
     return products;
   } catch {
     return [];
+  }
+}
+
+/**
+ * Extracts the basic name + price from a product page (the two fields the
+ * category listing normally supplies). Used by the single-product worker
+ * endpoint, where there is no category listing to read them from. Price is
+ * returned as digits only (matching parseCategoryHtml). Returns nulls on any
+ * parse error so the caller still gets the enrichment.
+ */
+export function parseProductBasicsFromHtml(html: string): {
+  name: string | null;
+  price: string | null;
+} {
+  try {
+    const $ = cheerio.load(html);
+    const name = $('h1.ui-pdp-title').first().text().trim() || null;
+    const price =
+      $('.andes-money-amount__fraction').first().text().trim().replace(/\./g, '') || null;
+    return { name, price };
+  } catch {
+    return { name: null, price: null };
   }
 }
 

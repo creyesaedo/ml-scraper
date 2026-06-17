@@ -9,6 +9,7 @@ import {
   SITE_GEO,
   categoryUrl,
   parseCategoryHtml,
+  parseProductBasicsFromHtml,
   parseProductPageHtml,
   siteHasBestSellers,
 } from './ml-parsers';
@@ -236,6 +237,39 @@ export class MlScraperService {
     if (res.targetStatus && res.targetStatus >= 400) return 'no_page';
     if (res.content.length < PARTIAL_PAGE_THRESHOLD) return 'failed';
     return parseCategoryHtml(res.content).length > 0 ? 'has_products' : 'empty';
+  }
+
+  /**
+   * Scrapes a single product page and returns its basic fields (name + price,
+   * normally read from the category listing) alongside the full enrichment.
+   * Used by the worker's single-product endpoint, where there is no category
+   * page to supply name/price. Run-level aborts propagate; any soft failure
+   * (error, partial render) yields nulls + EMPTY_ENRICHMENT.
+   */
+  async scrapeProductEnriched(
+    productUrl: string,
+    siteId: string,
+  ): Promise<{ name: string | null; price: string | null; enrichment: ProductEnrichment }> {
+    if (!this.config.decodoApiToken) {
+      this.logger.error('DECODO_API_TOKEN is not configured');
+      return { name: null, price: null, enrichment: EMPTY_ENRICHMENT };
+    }
+    let res: DecodoScrapeResult;
+    try {
+      res = await this.scrapeWithWait(productUrl, siteId, PRODUCT_WAIT_SELECTOR);
+    } catch (err) {
+      if (err instanceof ScraperAbortError) throw err;
+      this.logger.warn(`Unexpected error scraping ${productUrl}: ${(err as Error).message}`);
+      return { name: null, price: null, enrichment: EMPTY_ENRICHMENT };
+    }
+    if (res.error || res.content.length < PARTIAL_PAGE_THRESHOLD) {
+      if (res.error) this.logger.warn(`Error scraping product page ${productUrl}: ${res.error}`);
+      return { name: null, price: null, enrichment: EMPTY_ENRICHMENT };
+    }
+    return {
+      ...parseProductBasicsFromHtml(res.content),
+      enrichment: parseProductPageHtml(res.content),
+    };
   }
 
   private async scrapeProductPage(

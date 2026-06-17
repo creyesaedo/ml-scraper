@@ -1,19 +1,14 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import appConfig from './config/app.config';
-import { PrismaModule } from './prisma/prisma.module';
-import { CategoriesModule } from './categories/categories.module';
-import { ProductsModule } from './products/products.module';
-import { SyncModule } from './sync/sync.module';
-import { SchedulerModule } from './scheduler/scheduler.module';
-import { StatsModule } from './stats/stats.module';
+import { WorkerModule } from './worker/worker.module';
 import { AppController } from './app.controller';
 
-// The internal NestJS cron (WeeklySyncJob) is opt-in. GitHub Actions and the
-// CLI keep it off to avoid double-scheduling against the external trigger.
-const internalSchedulerEnabled =
-  process.env.ENABLE_INTERNAL_SCHEDULER?.toLowerCase() === 'true';
-
+/**
+ * ml-scraper is a stateless scraping worker: it performs all fetching (Decodo +
+ * ML API + FX + holidays) and exposes it over HTTP via WorkerModule. It owns no
+ * database — persistence and orchestration live in the separate ml-service.
+ */
 @Module({
   imports: [
     ConfigModule.forRoot({
@@ -21,12 +16,7 @@ const internalSchedulerEnabled =
       load: [appConfig],
       envFilePath: '.env',
     }),
-    PrismaModule,
-    CategoriesModule,
-    ProductsModule,
-    SyncModule,
-    StatsModule,
-    ...(internalSchedulerEnabled ? [SchedulerModule] : []),
+    WorkerModule,
   ],
   controllers: [AppController],
 })
