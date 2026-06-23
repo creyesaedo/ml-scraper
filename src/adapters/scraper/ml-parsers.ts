@@ -283,15 +283,24 @@ export function parseProductPageHtml(html: string): ProductEnrichment {
   const categoryIdMatch = html.match(/"categoryId"\s*:\s*"(M[A-Z]{2}[0-9]+)"/);
   if (categoryIdMatch) leaf_category_id = categoryIdMatch[1];
 
-  // ML's per-listing "item ID" shown on the product page as "Publicación #NNNNNN".
-  // Distinct from catalog_id (catalog product) — this identifies the specific listing.
+  // ML's per-listing "item ID" (the ml_public_id), distinct from catalog_id (the
+  // catalog product). Tried most-reliable first: the embedded `item_id` JSON and
+  // the app deep-link (`meli://item?id=...`) both sit near the top of the HTML and
+  // survive even when the visible "Publicación #NNN" footer is a non-interpolated
+  // template (`Publicación {item_id_number}`, common on catalog /p/ pages). The
+  // visible text is the last resort. Captured as digits only (site prefix dropped)
+  // to match how the rest of the pipeline stores it.
   let ml_public_id: string | null = null;
-  const publicIdMatch = html.match(/Publicaci[oó]n\s*#\s*(\d{6,})/i);
-  if (publicIdMatch) {
-    ml_public_id = publicIdMatch[1];
-  } else {
-    const itemIdMatch = html.match(/"item_id"\s*:\s*"M[A-Z]{2}(\d{6,})"/);
-    if (itemIdMatch) ml_public_id = itemIdMatch[1];
+  for (const re of [
+    /"item_id"\s*:\s*"M[A-Z]{2}(\d{6,})"/,
+    /meli:\/\/item\?id=M[A-Z]{2}(\d{6,})/,
+    /Publicaci[oó]n\s*#\s*(\d{6,})/i,
+  ]) {
+    const m = html.match(re);
+    if (m) {
+      ml_public_id = m[1];
+      break;
+    }
   }
 
   // Original price (previous_price.value just before current_price.value in the

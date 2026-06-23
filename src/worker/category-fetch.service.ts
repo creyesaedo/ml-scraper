@@ -155,6 +155,16 @@ export class CategoryFetchService {
       : null;
     const date_created = apiData?.date_created ?? pageData.date_created_from_page ?? null;
 
+    // Listing id (ml_public_id): prefer the scraped page; if it didn't yield one
+    // (render race / parser miss), fall back to the catalog API's buy-box winner.
+    // The API returns it site-prefixed ("MCO3975198228") — strip the prefix to
+    // match the page parser, which stores digits only.
+    const ml_public_id =
+      pageData.ml_public_id ??
+      (apiData?.buy_box_winner_item_id
+        ? apiData.buy_box_winner_item_id.replace(/^M[A-Z]{2}/, '')
+        : null);
+
     let leaf_category_name: string | null = null;
     if (pageData.leaf_category_id) {
       leaf_category_name = await this.resolveLeafName(pageData.leaf_category_id, leafNameCache);
@@ -166,7 +176,7 @@ export class CategoryFetchService {
       product_url: p.product_url,
       ranking_position: p.ranking_position,
       catalog_id: effectiveCatalogId,
-      ml_public_id: pageData.ml_public_id,
+      ml_public_id,
       date_created,
       sold_count: pageData.sold_count,
       rating: pageData.rating,

@@ -127,18 +127,26 @@ export class MercadoLibreClient {
   }
 
   /**
-   * Fetches a catalog product by its catalog id, used to read `date_created`
-   * (when the product was first listed). Returns null on failure so a single
-   * missing product never aborts the sync.
+   * Fetches a catalog product by its catalog id. Returns `date_created` (when the
+   * product was first listed) and the buy-box winner's listing id
+   * (`buy_box_winner.item_id`, e.g. "MCO3975198228") — a render-independent
+   * fallback for `ml_public_id` when the scraped page didn't yield one. The
+   * winner is often null (no active offer), so the caller must handle that.
+   * Returns null on failure so a single missing product never aborts the sync.
    */
-  async getCatalogProduct(catalogId: string): Promise<{ date_created: string } | null> {
+  async getCatalogProduct(
+    catalogId: string,
+  ): Promise<{ date_created: string; buy_box_winner_item_id: string | null } | null> {
     await this.ensureToken();
     try {
-      const resp = await this.http.get<{ date_created: string }>(
-        `/products/${catalogId}`,
-        { headers: this.authHeaders() },
-      );
-      return { date_created: resp.data.date_created };
+      const resp = await this.http.get<{
+        date_created: string;
+        buy_box_winner?: { item_id?: string | null } | null;
+      }>(`/products/${catalogId}`, { headers: this.authHeaders() });
+      return {
+        date_created: resp.data.date_created,
+        buy_box_winner_item_id: resp.data.buy_box_winner?.item_id ?? null,
+      };
     } catch (err) {
       this.logger.warn(`getCatalogProduct(${catalogId}) failed: ${errorMessage(err)}`);
       return null;

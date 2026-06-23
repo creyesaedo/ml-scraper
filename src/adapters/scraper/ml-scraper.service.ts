@@ -59,6 +59,14 @@ const WAIT_FOR_ELEMENT_TIMEOUT_S = 15;
 // genuine sustained outage from spinning (it still reaches the circuit breaker).
 const RENDER_FAILURE_MAX_RETRIES = 2;
 
+// Extra attempts when Decodo returns a 200 whose HTML is too small to hold the
+// page body (the streaming-SSR head-only race). Unlike render failures, a 200 IS
+// billed, so each retry costs a request — bounded to keep cost predictable. The
+// enrichment we need (item_id, sold, seller) lives in the body, so recovering it
+// is usually worth the extra attempt; raised from 1 to 3 to better survive the
+// races that left products without a listing id / sold count.
+const PARTIAL_RENDER_MAX_RETRIES = 3;
+
 type DecodoActions = Array<
   | { type: 'wait'; wait_time_s: number }
   | { type: 'scroll_to_bottom'; timeout_s: number }
@@ -338,14 +346,24 @@ export class MlScraperService {
       result = await this.postScrape(this.buildScrapeBody(url, siteId, waitSelector));
     }
 
-    if (this.config.scraperRetryPartialRender && this.isPartialRender(result)) {
-      this.logger.warn(
-        `[${siteId}] Partial render (${result.content.length}b) for ${url} — retrying once`,
-      );
-      const retry = await this.postScrape(this.buildScrapeBody(url, siteId, waitSelector));
-      // Keep the retry only if it actually came back fuller; otherwise return the
-      // first result so we never trade a usable response for a worse one.
-      return retry.content.length > result.content.length ? retry : result;
+    if (this.config.scraperRetryPartialRender) {
+      // Retry a head-only/partial render up to PARTIAL_RENDER_MAX_RETRIES times,
+      // always keeping the fullest response so far — we never trade a usable
+      // response for a worse one.
+      let best = result;
+      for (
+        let attempt = 0;
+        attempt < PARTIAL_RENDER_MAX_RETRIES && this.isPartialRender(best);
+        attempt++
+      ) {
+        this.logger.warn(
+          `[${siteId}] Partial render (${best.content.length}b) for ${url} — ` +
+            `retry ${attempt + 1}/${PARTIAL_RENDER_MAX_RETRIES}`,
+        );
+        const retry = await this.postScrape(this.buildScrapeBody(url, siteId, waitSelector));
+        if (retry.content.length > best.content.length) best = retry;
+      }
+      return best;
     }
 
     return result;
@@ -364,7 +382,11 @@ export class MlScraperService {
       geo: SITE_GEO[siteId] ?? 'ar',
       browser_actions: [
         { type: 'wait', wait_time_s: 4 },
-        { type: 'scroll_to_bottom', timeout_s: 3 },
+        // Scroll to the bottom to trigger ML's lazy-hydrated sections, then a
+        // fixed wait so the streamed body (item_id, sold count, seller block)
+        // finishes painting before Decodo captures the HTML.
+        { type: 'scroll_to_bottom', timeout_s: 5 },
+        { type: 'wait', wait_time_s: 3 },
         {
           type: 'wait_for_element',
           selector: { type: 'css', value: waitSelector },
