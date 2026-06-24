@@ -16,6 +16,7 @@ describe('app.config (worker)', () => {
     delete process.env.SCRAPER_FAILURE_THRESHOLD;
     delete process.env.DECODO_RATE_LIMIT_PER_SEC;
     delete process.env.PRODUCT_CONCURRENCY;
+    delete process.env.DECODO_GEO_OVERRIDES;
   });
 
   afterAll(() => {
@@ -66,6 +67,24 @@ describe('app.config (worker)', () => {
     it('clamps scraperFailureThreshold to a minimum of 1', () => {
       process.env.SCRAPER_FAILURE_THRESHOLD = '-3';
       expect(load().scraperFailureThreshold).toBe(1);
+    });
+  });
+
+  describe('decodoGeoOverrides', () => {
+    it('defaults to the known MCO->br fix', () => {
+      expect(load().decodoGeoOverrides).toEqual({ MCO: 'br' });
+    });
+    it('parses multiple "SITE:geo" pairs, normalising case', () => {
+      process.env.DECODO_GEO_OVERRIDES = 'mco:br, MLM:us';
+      expect(load().decodoGeoOverrides).toEqual({ MCO: 'br', MLM: 'us' });
+    });
+    it('yields an empty map when set to a blank value (overrides disabled)', () => {
+      process.env.DECODO_GEO_OVERRIDES = '';
+      expect(load().decodoGeoOverrides).toEqual({});
+    });
+    it('skips malformed pairs', () => {
+      process.env.DECODO_GEO_OVERRIDES = 'MCO:br,garbage,:,X:';
+      expect(load().decodoGeoOverrides).toEqual({ MCO: 'br' });
     });
   });
 });

@@ -18,7 +18,8 @@ import {
   ScraperAbortError,
   ScraperHealthService,
 } from './scraper-health.service';
-import { SCRAPER_SEMAPHORE, ScraperSlot } from './scraper-semaphore.provider';
+import { RequestOutcome } from './adaptive-limiter';
+import { SCRAPER_SEMAPHORE, ScraperGate } from './scraper-semaphore.provider';
 
 const DECODO_ENDPOINT = 'https://scraper-api.decodo.com/v2/scrape';
 
@@ -104,10 +105,15 @@ export class MlScraperService {
     @Inject(appConfig.KEY)
     private readonly config: ConfigType<typeof appConfig>,
     @Inject(SCRAPER_SEMAPHORE)
-    private readonly slot: ScraperSlot,
+    private readonly slot: ScraperGate,
     private readonly health: ScraperHealthService,
   ) {
     this.rateLimiter = this.createRateLimiter(this.config.decodoRateLimitPerSec);
+  }
+
+  /** Current adaptive-concurrency window snapshot (for diagnostics/observability). */
+  getConcurrencyStats(): { limit: number; inFlight: number; queued: number } {
+    return this.slot.getStats();
   }
 
   async scrapeCategoryWithProducts(
@@ -379,7 +385,11 @@ export class MlScraperService {
       url,
       proxy_pool: 'premium',
       headless: 'html',
-      geo: SITE_GEO[siteId] ?? 'ar',
+      // geo selects the proxy's exit country. Normally the site's own country
+      // (MCO -> 'co'), but a per-site override (DECODO_GEO_OVERRIDES) reroutes
+      // sites whose home proxy pool renders ML badly — notably MCO, which is
+      // routed through 'br' by default (its 'co' pool hangs/fails; see config).
+      geo: this.config.decodoGeoOverrides?.[siteId] || SITE_GEO[siteId] || 'ar',
       browser_actions: [
         { type: 'wait', wait_time_s: 4 },
         // Scroll to the bottom to trigger ML's lazy-hydrated sections, then a
@@ -422,7 +432,15 @@ export class MlScraperService {
    * which propagates out and aborts the sync.
    */
   private async postScrape(body: Record<string, unknown>): Promise<DecodoScrapeResult> {
-    return this.slot(async () => {
+    // Hold a global slot for the WHOLE request (including its internal retries),
+    // so in-flight count == requests-being-processed — exactly what the adaptive
+    // window governs. The outcome fed back below drives AIMD: a hard failure
+    // (Decodo saturated) shrinks the window; a success under saturation grows it.
+    // The drop signal is the FINAL outcome after retries, so a slow-but-OK MCO
+    // render is a success, not a drop — a flaky region never collapses the window.
+    const token = await this.slot.acquire();
+    let outcome: RequestOutcome = 'drop';
+    try {
       this.health.assertOpen();
       const result = await this.postScrapeInner(body, 0);
 
@@ -466,8 +484,14 @@ export class MlScraperService {
         this.health.reportSuccess();
       }
 
+      outcome = isHardFailure ? 'drop' : 'ok';
       return result;
-    });
+    } finally {
+      // `outcome` stays 'drop' if we threw (account error / breaker open), which
+      // correctly backs the window off as the run winds down.
+      this.slot.feedback(outcome, token.saturatedAtAcquire);
+      token.release();
+    }
   }
 
   private async postScrapeInner(
@@ -487,6 +511,10 @@ export class MlScraperService {
           Authorization: `Basic ${this.config.decodoApiToken}`,
         },
         body: JSON.stringify(body),
+        // Hard per-attempt ceiling: a stuck Decodo render aborts here as a
+        // TimeoutError (caught below as a transient network failure) instead of
+        // hanging on undici's ~300 s default and dying as a client disconnect.
+        signal: AbortSignal.timeout(this.config.decodoRequestTimeoutMs),
       });
       if (attempt > 0) {
         this.logger.log(`Decodo retry succeeded for ${targetUrl} (attempt ${attempt + 1})`);

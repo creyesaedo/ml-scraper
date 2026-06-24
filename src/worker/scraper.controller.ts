@@ -29,6 +29,12 @@ export class ScraperController {
     private readonly health: ScraperHealthService,
   ) {}
 
+  /** Current adaptive-concurrency window (limit / in-flight / queued) for diagnostics. */
+  @Get('scrape/gate')
+  gateStats(): { limit: number; inFlight: number; queued: number } {
+    return this.scraper.getConcurrencyStats();
+  }
+
   /** One full category enriched (best-sellers + product pages + ML API/FX/holidays). */
   @Post('scrape/category/:siteId/:categoryId')
   async scrapeCategory(

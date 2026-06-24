@@ -8,8 +8,15 @@ export interface AppConfig {
   decodoRateLimitPerSec: number;
   decodoTransientMaxRetries: number;
   decodoRetryBackoffBaseMs: number;
+  decodoRequestTimeoutMs: number;
+  decodoGeoOverrides: Record<string, string>;
   scraperMaxConcurrent: number;
   productConcurrency: number;
+  scraperAdaptiveConcurrency: boolean;
+  scraperMinConcurrent: number;
+  scraperInitialConcurrent: number;
+  scraperConcurrencyIncreaseStep: number;
+  scraperConcurrencyDecreaseFactor: number;
   scraperFailureThreshold: number;
   scraperFailureDumpDir: string;
   scraperRetryPartialRender: boolean;
@@ -48,6 +55,25 @@ export default registerAs(
       ? Math.max(1, parseInt(process.env.PRODUCT_CONCURRENCY, 10))
       : scraperMaxConcurrent;
 
+    // ── Adaptive (AIMD) concurrency ─────────────────────────────────────────
+    // Because Decodo's per-request latency is variable and unbounded, a fixed
+    // pool is always mis-sized. With adaptive mode ON (default) the in-flight
+    // window self-tunes: it starts near the plan rate and ramps UP on sustained
+    // success, then backs OFF multiplicatively on hard failures so a struggling
+    // backend (notably MCO) gets its queue drained instead of flooded.
+    // scraperMaxConcurrent is reused as the hard ceiling. Set
+    // SCRAPER_ADAPTIVE_CONCURRENCY=false to fall back to the fixed pool.
+    const scraperAdaptiveConcurrency = process.env.SCRAPER_ADAPTIVE_CONCURRENCY !== 'false';
+    const scraperMinConcurrent = Math.max(
+      1,
+      parseInt(process.env.SCRAPER_MIN_CONCURRENT ?? '4', 10),
+    );
+    // Start near the plan's req/s — enough to make progress without a thundering
+    // herd of heavy renders on the first wave; AIMD ramps it up from there.
+    const scraperInitialConcurrent = process.env.SCRAPER_INITIAL_CONCURRENT
+      ? Math.max(scraperMinConcurrent, parseInt(process.env.SCRAPER_INITIAL_CONCURRENT, 10))
+      : Math.min(scraperMaxConcurrent, Math.max(scraperMinConcurrent, decodoRateLimitPerSec));
+
     return {
       mlClientId: process.env.ML_CLIENT_ID ?? '',
       mlClientSecret: process.env.ML_CLIENT_SECRET ?? '',
@@ -70,8 +96,43 @@ export default registerAs(
         0,
         parseInt(process.env.DECODO_RETRY_BACKOFF_BASE_MS ?? '3000', 10),
       ),
+      // Hard per-attempt timeout for a single Decodo /v2/scrape call. Node's
+      // fetch otherwise leans on undici's ~300 s default, so a stuck render
+      // (notably MCO) wastes ~5 min and comes back as an unclassifiable client
+      // disconnect. A tighter ceiling turns it into a clean network failure that
+      // is retried promptly and, after the budget, feeds the AIMD decrease arm.
+      // Set ABOVE the worst legit single call — Decodo's own internal render
+      // retry loop has been observed at ~132 s — so we only cut genuine hangs,
+      // not slow-but-real renders. Default 180 s. Per-attempt — retries get fresh.
+      decodoRequestTimeoutMs: Math.max(
+        1000,
+        parseInt(process.env.DECODO_REQUEST_TIMEOUT_MS ?? '180000', 10),
+      ),
+      // Per-site proxy-exit geo overrides, "SITE:geo" pairs (e.g. "MCO:br").
+      // Some Decodo country pools render MercadoLibre badly: MCO ('co', Colombia)
+      // hangs/fails and burns long retry loops, while routing the SAME .com.co
+      // pages through 'br' renders them first-try (A/B verified: 38/38 vs 34/38,
+      // 0 retries vs many, 79 s vs 301 s). The page data is identical — the
+      // domain serves Colombian content regardless of the proxy's exit country.
+      // Default ships the known MCO->br fix; override via env to re-tune.
+      decodoGeoOverrides: parseGeoOverrides(process.env.DECODO_GEO_OVERRIDES ?? 'MCO:br'),
       scraperMaxConcurrent,
       productConcurrency,
+      scraperAdaptiveConcurrency,
+      scraperMinConcurrent,
+      scraperInitialConcurrent,
+      // Slots added per saturated success (additive increase). Default 1.
+      scraperConcurrencyIncreaseStep: Math.max(
+        1,
+        parseInt(process.env.SCRAPER_CONCURRENCY_INCREASE_STEP ?? '1', 10),
+      ),
+      // Window multiplier on a hard failure (multiplicative decrease). Default
+      // 0.8 — gentle enough to avoid oscillation, fast enough to drain a backlog.
+      scraperConcurrencyDecreaseFactor: clampFloat(
+        parseFloat(process.env.SCRAPER_CONCURRENCY_DECREASE_FACTOR ?? '0.8'),
+        0.1,
+        0.99,
+      ),
       scraperFailureThreshold: Math.max(1, parseInt(process.env.SCRAPER_FAILURE_THRESHOLD ?? '10', 10)),
       scraperFailureDumpDir: process.env.SCRAPER_FAILURE_DUMP_DIR ?? 'tmp/scraper-failures',
       // Retry a page once when Decodo returns a partial render (200 but body
@@ -81,3 +142,22 @@ export default registerAs(
     };
   },
 );
+
+/** Parses a float env value, falling back to a clamped sane range. */
+function clampFloat(value: number, lo: number, hi: number): number {
+  if (!Number.isFinite(value)) return hi;
+  return Math.min(hi, Math.max(lo, value));
+}
+
+/**
+ * Parses a "SITE:geo,SITE:geo" env string into a { SITE: geo } map. Site ids are
+ * upper-cased (MCO), geo codes lower-cased (br). Malformed pairs are skipped.
+ */
+function parseGeoOverrides(raw: string): Record<string, string> {
+  const map: Record<string, string> = {};
+  for (const pair of raw.split(',')) {
+    const [site, geo] = pair.split(':').map((s) => s.trim());
+    if (site && geo) map[site.toUpperCase()] = geo.toLowerCase();
+  }
+  return map;
+}

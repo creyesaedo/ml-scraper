@@ -1,4 +1,4 @@
-import pLimit from 'p-limit';
+import { AdaptiveLimiter } from './adaptive-limiter';
 import { DecodoAccountError } from './scraper-health.service';
 import { MlScraperService } from './ml-scraper.service';
 
@@ -40,6 +40,8 @@ function makeService(overrides: Partial<any> = {}) {
     decodoRateLimitPerSec: 1000,
     decodoTransientMaxRetries: 10,
     decodoRetryBackoffBaseMs: 1, // keep retries near-instant in tests
+    decodoRequestTimeoutMs: 120_000,
+    decodoGeoOverrides: {},
     scraperRetryPartialRender: true,
     ...overrides,
   } as any;
@@ -55,7 +57,7 @@ function makeService(overrides: Partial<any> = {}) {
       lastDumpDir: null,
     })),
   } as any;
-  const slot = pLimit(10);
+  const slot = new AdaptiveLimiter({ minLimit: 1, maxLimit: 10, initialLimit: 10 });
   const service = new MlScraperService(config, slot, health);
   return { service, health };
 }
@@ -90,13 +92,15 @@ describe('MlScraperService', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it('retries a partial render once and gives up returning 0 products', async () => {
+  it('retries a partial render up to the cap and gives up returning 0 products', async () => {
     const { service } = makeService();
-    // Both attempts come back too small → partial render, no products.
+    // Every attempt comes back too small → partial render, no products. The
+    // category page is retried PARTIAL_RENDER_MAX_RETRIES (3) times after the
+    // initial attempt → 4 calls total.
     fetchMock.mockResolvedValue(decodoResponse({ targetStatus: 200, content: SMALL }));
     const res = await service.scrapeCategoryWithProducts('MLC', 'MLC1');
     expect(res.products).toEqual([]);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 
   it('scrapes a category and enriches its product pages', async () => {
@@ -130,12 +134,31 @@ describe('MlScraperService', () => {
     expect(body.browser_actions.map((a: any) => a.type)).toEqual([
       'wait',
       'scroll_to_bottom',
+      'wait',
       'wait_for_element',
     ]);
     // wait_for_element returns the rendered HTML instead of aborting on timeout.
     const wfe = body.browser_actions.find((a: any) => a.type === 'wait_for_element');
     expect(wfe.on_error).toBe('skip');
     expect(urlOf(fetchMock.mock.calls[0])).toContain('/mas-vendidos/MLC1');
+  });
+
+  it('applies a per-site geo override (MCO routed through br)', async () => {
+    const { service } = makeService({ decodoGeoOverrides: { MCO: 'br' } });
+    fetchMock.mockResolvedValue(decodoResponse({ targetStatus: 404, content: SMALL }));
+    await service.scrapeCategoryWithProducts('MCO', 'MCO1');
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.geo).toBe('br'); // override wins over SITE_GEO['MCO'] === 'co'
+  });
+
+  it('falls back to the site geo when no override is configured', async () => {
+    const { service } = makeService({ decodoGeoOverrides: { MCO: 'br' } });
+    fetchMock.mockResolvedValue(decodoResponse({ targetStatus: 404, content: SMALL }));
+    await service.scrapeCategoryWithProducts('MLC', 'MLC1'); // not overridden
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.geo).toBe('cl');
   });
 
   it('aborts the run on an account-level Decodo error (402)', async () => {
@@ -170,6 +193,36 @@ describe('MlScraperService', () => {
     const res = await service.scrapeCategoryWithProducts('MLC', 'MLC1', 4);
 
     expect(catCalls).toBe(2); // first 400 was retried and the retry succeeded
+    expect(res.products).toHaveLength(1);
+  });
+
+  it('passes a per-attempt abort signal and retries a request timeout once', async () => {
+    const { service } = makeService();
+    let catCalls = 0;
+    fetchMock.mockImplementation((_url: string, opts: any) => {
+      const target = JSON.parse(opts.body).url as string;
+      // Every call must carry a fresh AbortSignal (the per-attempt timeout).
+      expect(opts.signal).toBeInstanceOf(AbortSignal);
+      if (target.includes('/mas-vendidos/')) {
+        catCalls += 1;
+        if (catCalls === 1) {
+          // First attempt times out: fetch rejects with a TimeoutError, exactly
+          // like AbortSignal.timeout firing. Treated as a transient network
+          // failure → single retry.
+          return Promise.reject(
+            Object.assign(new Error('The operation was aborted due to timeout'), {
+              name: 'TimeoutError',
+            }),
+          );
+        }
+        return Promise.resolve(decodoResponse({ content: CATEGORY_HTML }));
+      }
+      return Promise.resolve(decodoResponse({ content: PRODUCT_HTML }));
+    });
+
+    const res = await service.scrapeCategoryWithProducts('MLC', 'MLC1', 4);
+
+    expect(catCalls).toBe(2); // timed-out first attempt was retried and recovered
     expect(res.products).toHaveLength(1);
   });
 

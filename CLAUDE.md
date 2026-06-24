@@ -156,10 +156,25 @@ product alike) the service POSTs to `https://scraper-api.decodo.com/v2/scrape`:
 - **Markets with no best-sellers (MLD, MLV):** classifieds-only; `SITES_WITHOUT_BESTSELLERS` in `ml-parsers.ts` skips them before any billed request.
 - **ML Search API blocked** (403) and **sold_quantity not in API** — scraping is the only source.
 - **Decodo head-only / streaming-SSR race:** see the `browser_actions` chain + partial-render retry above.
+- **MercadoLibre Colombia (MCO) via Decodo's `co` proxy pool — broken; routed through `br`.** Scraping `mercadolibre.com.co` through Colombian exit IPs (`geo: 'co'`, the natural mapping) renders slowly or not at all: pages hang and Decodo burns long internal render-retry loops (single calls observed at 100–300 s, many timing out). The cause is Decodo's `co` pool, **not** our code or the `SITE_GEO` mapping — routing the *same* `.com.co` URLs through `br` exit IPs renders them first-try. Verified A/B on the 38 historically-failing MCO catalog products:
 
-## Concurrency cap
+  | geo | enriched | retries | wall | p50 / max latency |
+  |---|---|---|---|---|
+  | `co` (home) | 34/38 (89.5%), 4 hung @301 s | many | 300.9 s | ~84 s / 300 s+ |
+  | `br` | **38/38 (100%)** | **0** | **79.2 s** | 28 s / 79 s |
 
-A single `p-limit(SCRAPER_MAX_CONCURRENT)` in `ScraperModule` gates every outbound request. **Auto-sized** from `DECODO_RATE_LIMIT_PER_SEC` via Little's law (`rate × DECODO_AVG_REQUEST_SECONDS`, ~375 at 25 req/s × 15 s) so the pool is exactly big enough to saturate the plan rate. The rate limiter is the precise pacer. The operator's single knob is `DECODO_RATE_LIMIT_PER_SEC`; set `SCRAPER_MAX_CONCURRENT` only to impose a manual hard ceiling.
+  The page **data is identical** either way — the `.com.co` domain serves Colombian content (COP prices, sold counts, sellers) regardless of the proxy's exit country; geo only affects ML's anti-bot tolerance / render reliability. The fix is the per-site `DECODO_GEO_OVERRIDES` map (default `MCO:br`) applied in `buildScrapeBody`. If `br` ever degrades, re-A/B another nearby pool (e.g. `mx`, `pe`, `cl`) and update the override.
+
+## Concurrency cap (adaptive AIMD)
+
+A process-wide gate in `ScraperModule` (`SCRAPER_SEMAPHORE`) caps in-flight requests; `MlScraperService.postScrape` holds one slot for a whole request (including its internal retries) and feeds the **final** outcome back to the gate.
+
+Because Decodo's per-request latency is **variable and unbounded** (a clean page ~25 s; a flaky MCO page rides its retry budget for minutes), a fixed `rate × seconds` pool is always mis-sized — too small and the plan rate is never reached, too large and a latency spike floods Decodo with thousands of concurrent renders whose tail times out. So the gate is an **AIMD limiter** (`adaptive-limiter.ts`, like TCP congestion control):
+
+- a **success acquired under saturation** nudges the window up by `SCRAPER_CONCURRENCY_INCREASE_STEP` (additive increase);
+- a **hard failure** (network / 5xx / 613 that never cleared after retries) cuts the window to `× SCRAPER_CONCURRENCY_DECREASE_FACTOR` (multiplicative decrease), draining Decodo's queue instead of flooding it.
+
+The drop signal is the request's **final** outcome, so a slow-but-eventually-OK MCO render counts as a success — a Colombia-heavy batch ramps the window *down only when Decodo is truly saturated*, then recovers; it never collapses permanently. The window is clamped to `[SCRAPER_MIN_CONCURRENT, SCRAPER_MAX_CONCURRENT]`, starts at `SCRAPER_INITIAL_CONCURRENT` (≈ the plan req/s), and the sliding-window rate limiter stays the hard submission ceiling. Set `SCRAPER_ADAPTIVE_CONCURRENCY=false` to fall back to a fixed pool of `SCRAPER_MAX_CONCURRENT` (still auto-sized via Little's law, `rate × DECODO_AVG_REQUEST_SECONDS`). The operator's single knob remains `DECODO_RATE_LIMIT_PER_SEC`.
 
 ## Relevant settings (`src/config/app.config.ts`)
 
@@ -172,12 +187,19 @@ A single `p-limit(SCRAPER_MAX_CONCURRENT)` in `ScraperModule` gates every outbou
 | `DECODO_RATE_LIMIT_PER_SEC` | `10` | Plan req/s cap: Free/$19=10, $49=25, $99=50, $249=100, $499=150, $999+=200 |
 | `DECODO_TRANSIENT_MAX_RETRIES` | `10` | Retries for transient `400`/`5xx`. `429`/network keep a single retry; account errors never retried |
 | `DECODO_RETRY_BACKOFF_BASE_MS` | `3000` | Exponential backoff base (`base · 2^attempt`, capped 30 s) |
-| `SCRAPER_MAX_CONCURRENT` | *auto* (`rate × DECODO_AVG_REQUEST_SECONDS`) | Global in-flight pool. Leave unset |
-| `DECODO_AVG_REQUEST_SECONDS` | `15` | Seconds a request holds a slot (auto-concurrency calc only) |
-| `PRODUCT_CONCURRENCY` | *auto* (`= pool`) | Product pages in flight per category fetch |
+| `DECODO_REQUEST_TIMEOUT_MS` | `180000` | Hard per-attempt timeout for one Decodo `/v2/scrape` call (vs undici's ~300 s default). Set above the worst legit single call (Decodo's internal render retry ~132 s) so only genuine hangs are cut → abort as a clean network failure → retried, then feeds the AIMD decrease arm |
+| `DECODO_GEO_OVERRIDES` | `MCO:br` | Per-site proxy-exit geo overrides (`"SITE:geo,SITE:geo"`). Reroutes sites whose home Decodo pool renders ML badly. Ships the MCO→br fix (see "MercadoLibre Colombia" below); set to a blank value to disable |
+| `SCRAPER_MAX_CONCURRENT` | *auto* (`rate × DECODO_AVG_REQUEST_SECONDS`) | Hard ceiling of the in-flight window. Leave unset |
+| `DECODO_AVG_REQUEST_SECONDS` | `15` | Seconds a request holds a slot (auto-ceiling / fixed-pool calc only) |
+| `SCRAPER_ADAPTIVE_CONCURRENCY` | `true` | AIMD window that self-tunes to real latency. `false` → fixed pool of `SCRAPER_MAX_CONCURRENT` |
+| `SCRAPER_MIN_CONCURRENT` | `4` | Lower bound of the AIMD window (never throttles below) |
+| `SCRAPER_INITIAL_CONCURRENT` | *auto* (`= DECODO_RATE_LIMIT_PER_SEC`) | Window size to start from before any feedback |
+| `SCRAPER_CONCURRENCY_INCREASE_STEP` | `1` | Slots added per saturated success (additive increase) |
+| `SCRAPER_CONCURRENCY_DECREASE_FACTOR` | `0.8` | Window multiplier on a hard failure (multiplicative decrease) |
+| `PRODUCT_CONCURRENCY` | *auto* (`= ceiling`) | Product pages in flight per category fetch |
 | `SCRAPER_FAILURE_THRESHOLD` | `10` | Consecutive hard failures before the breaker trips |
 | `SCRAPER_FAILURE_DUMP_DIR` | `tmp/scraper-failures` | Where the breaker dumps diagnostics |
-| `SCRAPER_RETRY_PARTIAL_RENDER` | `true` | Retry once on a <50 KB partial render |
+| `SCRAPER_RETRY_PARTIAL_RENDER` | `true` | Retry a <50 KB partial render (up to 3×, keeping the fullest response) |
 
 ## Code conventions
 
