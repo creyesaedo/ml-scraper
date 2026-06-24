@@ -109,9 +109,10 @@ product alike) the service POSTs to `https://scraper-api.decodo.com/v2/scrape`:
   "geo": "cl",
   "browser_actions": [
     { "type": "wait", "wait_time_s": 4 },
-    { "type": "scroll_to_bottom", "timeout_s": 3 },
+    { "type": "scroll_to_bottom", "timeout_s": 5 },
+    { "type": "wait", "wait_time_s": 3 },
     { "type": "wait_for_element",
-      "selector": { "type": "css", "value": "li.ui-search-layout__item OR .ui-pdp-price" },
+      "selector": { "type": "css", "value": "li.ui-search-layout__item (category) | .nav-footer (product)" },
       "timeout_s": 15, "on_error": "skip" }
   ]
 }
@@ -121,7 +122,7 @@ product alike) the service POSTs to `https://scraper-api.decodo.com/v2/scrape`:
 
 - `proxy_pool: standard` returns `status_code: 613` ("not able to scrape") for ML — Decodo's standard pool cannot pass the PoW challenge. Premium is the only viable pool.
 - `headless: html` without JS rendering returns the PoW challenge page (~5–11 KB). ML's anti-bot validates TLS fingerprint, HTTP/2 frame ordering, and the runtime `window.snoopy.track('/anubis')` JS signal — only Decodo's premium + headless solver passes.
-- `browser_actions` chain works around a Decodo-side bug: ML pages use streaming SSR (React Server Components). Decodo's renderer sometimes captures HTML before all chunks arrive, returning only the `<head>` (~5–11 KB) with a 200 status. The chain forces (a) a hard 4 s pause for streaming to complete, (b) `scroll_to_bottom` to trigger lazy-hydration sections, (c) `wait_for_element` to verify the price block is in the DOM. Validated at 100 % success across two verticals; without it, 5–10 % came back head-only.
+- `browser_actions` chain works around a Decodo-side bug: ML pages use streaming SSR (React Server Components). Decodo's renderer sometimes captures HTML before all chunks arrive, returning only the `<head>` (~5–11 KB) with a 200 status. The chain forces (a) a hard 4 s pause for streaming to complete, (b) `scroll_to_bottom` to trigger lazy-hydration sections, (c) a 3 s settle wait, (d) `wait_for_element` on a readiness anchor — the product-list item on category pages, and the **global footer (`.nav-footer`)** on product pages. The footer is the last static element in document order (~98% of the HTML), so its presence proves the whole document streamed and the enrichment JSON (item_id/seller_id/sold, in the top ~4%) was captured; it's far more stable than a lazy recommendation carousel or `.ui-pdp-price` (~58%, can render before later sections). Validated at 100 % success across two verticals; without it, 5–10 % came back head-only.
 
 ### Billing-aware retries & circuit breaker
 

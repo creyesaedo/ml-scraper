@@ -42,8 +42,20 @@ const PARTIAL_PAGE_THRESHOLD = 50_000;
 // CSS selectors Decodo's headless waits for before returning the HTML.
 // ML uses streaming SSR — without these waits, the renderer sometimes
 // captures the page mid-stream with only <head> populated.
+//
+// Category: the product list item — confirms the ranking rendered.
+// Product:  the GLOBAL FOOTER, the last static element in document order
+//   (~98% of the HTML; measured on a live MCO PDP). The enrichment we parse
+//   (item_id, seller_id, sold) lives in inline JSON in the TOP ~4%, so waiting
+//   for the footer guarantees the whole document streamed and that JSON is
+//   captured. It's static (not lazy-hydrated) and identical on every ML page,
+//   so it's the latest + most stable readiness anchor — far more reliable than
+//   a lazy recommendation carousel (variable/optional) or `.ui-pdp-price`
+//   (~58%, which can be present before later sections finished). wait_for_element
+//   exits as soon as it appears and on_error:'skip' returns whatever rendered, so
+//   the only cost on a slow page is up to the element timeout, never lost data.
 const CATEGORY_WAIT_SELECTOR = 'li.ui-search-layout__item';
-const PRODUCT_WAIT_SELECTOR = '.ui-pdp-price';
+const PRODUCT_WAIT_SELECTOR = '.nav-footer';
 
 // Ceiling for how long Decodo waits for the target element before returning the
 // HTML it has. wait_for_element exits as soon as the element appears, so raising
