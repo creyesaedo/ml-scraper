@@ -6,6 +6,8 @@ import {
   parseCategoryHtml,
   parseProductPageHtml,
   siteHasBestSellers,
+  itemIdFromUrl,
+  userProductIdFromUrl,
 } from './ml-parsers';
 
 describe('ml-parsers', () => {
@@ -219,6 +221,70 @@ describe('ml-parsers', () => {
     it('extracts MPE catalog product id', () => {
       const e = parseProductPageHtml('"catalogProductId":"MPE123456"');
       expect(e.catalog_product_id_from_page).toBe('MPE123456');
+    });
+  });
+
+  describe('userProductIdFromUrl', () => {
+    it('extracts the /up/ user-product id', () => {
+      expect(
+        userProductIdFromUrl('https://www.mercadolibre.cl/neilmed-piercing-aftercare-75ml/up/MLCU57917080'),
+      ).toBe('MLCU57917080');
+    });
+
+    it('ignores query/hash after the id', () => {
+      expect(userProductIdFromUrl('https://x.com/foo/up/MLAU123?ref=1#tab')).toBe('MLAU123');
+    });
+
+    it('returns null for a /p/ catalog URL', () => {
+      expect(userProductIdFromUrl('https://www.mercadolibre.com.co/x/p/MCO44915739')).toBeNull();
+    });
+
+    it('returns null for a null URL', () => {
+      expect(userProductIdFromUrl(null)).toBeNull();
+    });
+  });
+
+  describe('itemIdFromUrl', () => {
+    it('extracts the item id from a classic listing URL', () => {
+      expect(
+        itemIdFromUrl(
+          'https://articulo.mercadolibre.com.ar/MLA-1100317427-medias-de-compresion-_JM?searchVariation=173720954788',
+        ),
+      ).toBe('MLA1100317427');
+    });
+
+    it('works for 3-letter site codes (MCO)', () => {
+      expect(itemIdFromUrl('https://articulo.mercadolibre.com.co/MCO-1234567-x')).toBe('MCO1234567');
+    });
+
+    it('returns null for a /p/ catalog URL (handled separately)', () => {
+      expect(itemIdFromUrl('https://www.mercadolibre.com.co/x/p/MCO44915739')).toBeNull();
+    });
+
+    it('returns null for a /up/ user-product URL (handled separately)', () => {
+      expect(itemIdFromUrl('https://www.mercadolibre.cl/x/up/MLCU57917080')).toBeNull();
+    });
+
+    it('returns null for a null URL', () => {
+      expect(itemIdFromUrl(null)).toBeNull();
+    });
+  });
+
+  describe('parseProductPageHtml — ml_public_id fallbacks', () => {
+    it('falls back to the meli://item deep-link when item_id JSON is absent', () => {
+      // Catalog /p/ pages render "Publicación {item_id_number}" (a non-interpolated
+      // template) instead of "Publicación #NNN", so only the deep-link carries it.
+      const html = 'Publicación {item_id_number} <meta content="meli://item?id=MCO3975198228">';
+      expect(parseProductPageHtml(html).ml_public_id).toBe('3975198228');
+    });
+
+    it('prefers the item_id JSON over the deep-link when both are present', () => {
+      const html = '"item_id":"MCO1111111111" meli://item?id=MCO2222222222';
+      expect(parseProductPageHtml(html).ml_public_id).toBe('1111111111');
+    });
+
+    it('is null when no listing-id signal is present', () => {
+      expect(parseProductPageHtml('Publicación {item_id_number}').ml_public_id).toBeNull();
     });
   });
 

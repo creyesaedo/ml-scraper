@@ -74,11 +74,26 @@ describe('MercadoLibreClient', () => {
   });
 
   describe('getCatalogProduct', () => {
-    it('returns only date_created', async () => {
+    it('returns date_created and a null buy-box winner when absent', async () => {
       const { client, http } = makeClient();
       http.get.mockResolvedValue({ data: { date_created: '2022-05-01T00:00:00Z', extra: 1 } });
       expect(await client.getCatalogProduct('MLC9')).toEqual({
         date_created: '2022-05-01T00:00:00Z',
+        buy_box_winner_item_id: null,
+      });
+    });
+
+    it('extracts the buy-box winner item id when present', async () => {
+      const { client, http } = makeClient();
+      http.get.mockResolvedValue({
+        data: {
+          date_created: '2022-05-01T00:00:00Z',
+          buy_box_winner: { item_id: 'MCO3975198228' },
+        },
+      });
+      expect(await client.getCatalogProduct('MCO44915739')).toEqual({
+        date_created: '2022-05-01T00:00:00Z',
+        buy_box_winner_item_id: 'MCO3975198228',
       });
     });
 
@@ -86,6 +101,46 @@ describe('MercadoLibreClient', () => {
       const { client, http } = makeClient();
       http.get.mockRejectedValue(new Error('boom'));
       expect(await client.getCatalogProduct('MLC9')).toBeNull();
+    });
+  });
+
+  describe('getUserProduct', () => {
+    it('returns date_created from the user-products endpoint', async () => {
+      const { client, http } = makeClient();
+      http.get.mockResolvedValue({ data: { date_created: '2024-01-03T04:58:48.106+0000', name: 'x' } });
+      expect(await client.getUserProduct('MLCU57917080')).toEqual({
+        date_created: '2024-01-03T04:58:48.106+0000',
+      });
+      expect(http.get).toHaveBeenCalledWith('/user-products/MLCU57917080', expect.anything());
+    });
+
+    it('returns a null date when the field is absent', async () => {
+      const { client, http } = makeClient();
+      http.get.mockResolvedValue({ data: { name: 'x' } });
+      expect(await client.getUserProduct('MLCU1')).toEqual({ date_created: null });
+    });
+
+    it('returns null when the request fails', async () => {
+      const { client, http } = makeClient();
+      http.get.mockRejectedValue(new Error('boom'));
+      expect(await client.getUserProduct('MLCU1')).toBeNull();
+    });
+  });
+
+  describe('getItemDate', () => {
+    it('returns date_created from the description sub-resource', async () => {
+      const { client, http } = makeClient();
+      http.get.mockResolvedValue({ data: { date_created: '2021-09-02T18:00:24.000Z', text: 'x' } });
+      expect(await client.getItemDate('MLA1100317427')).toEqual({
+        date_created: '2021-09-02T18:00:24.000Z',
+      });
+      expect(http.get).toHaveBeenCalledWith('/items/MLA1100317427/description', expect.anything());
+    });
+
+    it('returns null when the request fails', async () => {
+      const { client, http } = makeClient();
+      http.get.mockRejectedValue(new Error('boom'));
+      expect(await client.getItemDate('MLA1')).toBeNull();
     });
   });
 });

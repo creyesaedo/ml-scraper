@@ -129,6 +129,34 @@ export function siteIdFromUrl(url: string): string | null {
   return null;
 }
 
+/**
+ * Extracts the "user product" id from a `/up/` URL (e.g.
+ * ".../up/MLCU57917080" -> "MLCU57917080"), or null when the URL is not a `/up/`
+ * page. This id is NOT a catalog id; it feeds the ML `/user-products/{id}` API,
+ * the only reliable source of `date_created` for /up/ products (their HTML does
+ * not embed it). Grabs the whole path segment so it is robust to the exact id shape.
+ */
+export function userProductIdFromUrl(url: string | null): string | null {
+  if (!url) return null;
+  const m = url.match(/\/up\/([^/?#]+)/);
+  return m ? m[1] : null;
+}
+
+/**
+ * Extracts the listing item id from a CLASSIC listing URL
+ * ("articulo.mercadolibre.com.ar/MLA-1100317427-title..." -> "MLA1100317427").
+ * Returns null for catalog (`/p/`) and user-product (`/up/`) URLs — those carry
+ * their own id types and are handled separately. The classic URL embeds the id
+ * as "{SITE}-{digits}". Used to fetch the listing's date via the public
+ * `/items/{id}/description` endpoint (the `/items/{id}` resource itself is 403).
+ */
+export function itemIdFromUrl(url: string | null): string | null {
+  if (!url) return null;
+  if (url.includes('/p/') || url.includes('/up/')) return null;
+  const m = url.match(/\/(M[A-Z]{2})-?(\d{6,})/);
+  return m ? m[1] + m[2] : null;
+}
+
 // 2-letter geo code used by Decodo's `geo` parameter, derived from siteId.
 export const SITE_GEO: Record<string, string> = {
   MLA: 'ar',

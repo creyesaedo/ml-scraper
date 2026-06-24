@@ -9,7 +9,9 @@ import {
   EMPTY_ENRICHMENT,
   ProductEnrichment,
   ScrapedProduct,
+  itemIdFromUrl,
   siteIdFromUrl,
+  userProductIdFromUrl,
 } from '../adapters/scraper/ml-parsers';
 import { MlScraperService } from '../adapters/scraper/ml-scraper.service';
 import { ScraperHealthService } from '../adapters/scraper/scraper-health.service';
@@ -153,7 +155,24 @@ export class CategoryFetchService {
     const apiData = effectiveCatalogId
       ? await this.mlClient.getCatalogProduct(effectiveCatalogId)
       : null;
-    const date_created = apiData?.date_created ?? pageData.date_created_from_page ?? null;
+
+    // Resolve date_created from the cheapest source first (catalog API or the
+    // scraped page); if still missing, fall back to a ML API keyed by the URL
+    // TYPE — each kind of MercadoLibre page exposes the date differently:
+    //   /p/  catalog product -> catalog API (apiData, above)
+    //   /up/ user product    -> user-products API (its HTML has no date_created)
+    //   classic listing      -> the item's public description sub-resource
+    //                           (/items/{id} is 403, but .../description is open)
+    let date_created = apiData?.date_created ?? pageData.date_created_from_page ?? null;
+    if (!date_created && !effectiveCatalogId) {
+      const userProductId = userProductIdFromUrl(p.product_url);
+      const itemId = itemIdFromUrl(p.product_url);
+      if (userProductId) {
+        date_created = (await this.mlClient.getUserProduct(userProductId))?.date_created ?? null;
+      } else if (itemId) {
+        date_created = (await this.mlClient.getItemDate(itemId))?.date_created ?? null;
+      }
+    }
 
     // Listing id (ml_public_id): prefer the scraped page; if it didn't yield one
     // (render race / parser miss), fall back to the catalog API's buy-box winner.

@@ -152,6 +152,51 @@ export class MercadoLibreClient {
       return null;
     }
   }
+
+  /**
+   * Fetches a "user product" (the `/up/` id, e.g. "MLCU57917080") via the ML
+   * API. Unlike catalog products, `/up/` pages do NOT embed `date_created` in
+   * their HTML, so this is the only reliable source of it for them. Returns null
+   * on failure so a single missing product never aborts the sync.
+   */
+  async getUserProduct(
+    userProductId: string,
+  ): Promise<{ date_created: string | null } | null> {
+    await this.ensureToken();
+    try {
+      const resp = await this.http.get<{ date_created?: string | null }>(
+        `/user-products/${userProductId}`,
+        { headers: this.authHeaders() },
+      );
+      return { date_created: resp.data.date_created ?? null };
+    } catch (err) {
+      this.logger.warn(`getUserProduct(${userProductId}) failed: ${errorMessage(err)}`);
+      return null;
+    }
+  }
+
+  /**
+   * Fetches a CLASSIC listing's creation date via its public description
+   * sub-resource (`/items/{id}/description`). The main `/items/{id}` resource is
+   * 403 for non-owners, but the description endpoint is open and carries
+   * `date_created` (when the description — effectively the listing — was created).
+   * It is a close proxy for the listing date (a seller could re-create the
+   * description, but in practice it tracks the original publish date). Returns
+   * null on failure so a single missing product never aborts the sync.
+   */
+  async getItemDate(itemId: string): Promise<{ date_created: string | null } | null> {
+    await this.ensureToken();
+    try {
+      const resp = await this.http.get<{ date_created?: string | null }>(
+        `/items/${itemId}/description`,
+        { headers: this.authHeaders() },
+      );
+      return { date_created: resp.data.date_created ?? null };
+    } catch (err) {
+      this.logger.warn(`getItemDate(${itemId}) failed: ${errorMessage(err)}`);
+      return null;
+    }
+  }
 }
 
 /**
