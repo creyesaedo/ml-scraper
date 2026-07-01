@@ -16,7 +16,13 @@ import {
 import { MlScraperService } from '../adapters/scraper/ml-scraper.service';
 import { ScraperHealthService } from '../adapters/scraper/scraper-health.service';
 import appConfig from '../config/app.config';
-import { EnrichedProduct } from './enriched-product.dto';
+import {
+  EnrichedProduct,
+  EnrichInput,
+  EnrichResult,
+  RawScrapedProduct,
+  ReviewLevels,
+} from './enriched-product.dto';
 
 /**
  * Converts a local-currency amount to USD (local units per 1 USD), rounded to 2
@@ -61,6 +67,20 @@ export class CategoryFetchService {
     siteId: string,
     categoryMlId: string,
   ): Promise<EnrichedProduct[]> {
+    const raws = await this.fetchRawCategory(siteId, categoryMlId);
+    if (!raws.length) return [];
+    const results = await this.enrichProducts(raws.map((r) => toEnrichInput(siteId, r)));
+    return raws.map((r, i) => mergeEnriched(r, results[i]));
+  }
+
+  /**
+   * PHASE 1 (Decodo only, no ML API). Scrapes a category's best-sellers and
+   * returns each product with everything obtainable WITHOUT the ML API: page
+   * fields + FX + holiday. ml-service stages these; the ML-API enrichment happens
+   * later in {@link enrichProducts}, rate-limited and resumable. The circuit
+   * breaker is reset on entry; run-level aborts propagate to the caller.
+   */
+  async fetchRawCategory(siteId: string, categoryMlId: string): Promise<RawScrapedProduct[]> {
     this.health.reset();
     const productConcurrency = this.config.productConcurrency;
 
@@ -75,19 +95,26 @@ export class CategoryFetchService {
     const currency = currencyForSite(siteId);
     const exchangeRate = currency ? await this.exchangeRates.getRate(currency, snapshotDate) : null;
     const holidayName = await this.holidays.getHolidayName(snapshotDate, siteId);
-    const leafNameCache = new Map<string, string | null>();
-    const limit = pLimit(productConcurrency);
 
-    return Promise.all(
-      products.map((p) =>
-        limit(async () => {
-          const pageData = p.product_url
-            ? enrichmentsByUrl.get(p.product_url) ?? EMPTY_ENRICHMENT
-            : EMPTY_ENRICHMENT;
-          return this.buildEnriched(p, pageData, siteId, currency, exchangeRate, holidayName, leafNameCache);
-        }),
-      ),
-    );
+    return products.map((p) => {
+      const pageData = p.product_url
+        ? enrichmentsByUrl.get(p.product_url) ?? EMPTY_ENRICHMENT
+        : EMPTY_ENRICHMENT;
+      return this.buildRaw(p, pageData, currency, exchangeRate, holidayName);
+    });
+  }
+
+  /**
+   * PHASE 2 (ML API, rate-limited). For each input resolves `date_created`, the
+   * leaf category name, reviews and weekly visits via the ML official API, and
+   * recovers `ml_public_id` from the catalog buy-box when the page missed it.
+   * Returns results positionally aligned to `items`. All calls go through the
+   * client's global rate limiter (≤ ML's 25 req/s), so this paces itself.
+   */
+  async enrichProducts(items: EnrichInput[]): Promise<EnrichResult[]> {
+    const leafNameCache = new Map<string, string | null>();
+    const limit = pLimit(this.config.productConcurrency);
+    return Promise.all(items.map((it) => limit(() => this.enrichOne(it, leafNameCache))));
   }
 
   /**
@@ -115,17 +142,12 @@ export class CategoryFetchService {
       price: price ?? '0',
       catalog_id: null,
       product_url: url,
-      ranking_position: 0,
+      // No ranking context on a single-product scrape (not a best-sellers list).
+      ranking_position: null,
     };
-    return this.buildEnriched(
-      scraped,
-      enrichment,
-      siteId,
-      currency,
-      exchangeRate,
-      holidayName,
-      new Map(),
-    );
+    const raw = this.buildRaw(scraped, enrichment, currency, exchangeRate, holidayName);
+    const [result] = await this.enrichProducts([toEnrichInput(siteId, raw)]);
+    return mergeEnriched(raw, result);
   }
 
   /** Resolves a leaf category's name via the ML API, cached per call. */
@@ -140,66 +162,28 @@ export class CategoryFetchService {
     return name;
   }
 
-  /** Assembles the persist-ready DTO from listing + page + API/FX/holiday data. */
-  private async buildEnriched(
+  /**
+   * PHASE 1 assembly: the listing/page/FX/holiday fields — everything obtainable
+   * without the ML API. `ml_public_id` is the page-parsed one (no buy-box fallback
+   * here; that needs the ML API and happens in {@link enrichOne}).
+   */
+  private buildRaw(
     p: ScrapedProduct,
     pageData: ProductEnrichment,
-    siteId: string,
     currency: string | null,
     exchangeRate: number | null,
     holidayName: string | null,
-    leafNameCache: Map<string, string | null>,
-  ): Promise<EnrichedProduct> {
+  ): RawScrapedProduct {
     const effectiveCatalogId = p.catalog_id ?? pageData.catalog_product_id_from_page ?? null;
-
-    const apiData = effectiveCatalogId
-      ? await this.mlClient.getCatalogProduct(effectiveCatalogId)
-      : null;
-
-    // Resolve date_created from the cheapest source first (catalog API or the
-    // scraped page); if still missing, fall back to a ML API keyed by the URL
-    // TYPE — each kind of MercadoLibre page exposes the date differently:
-    //   /p/  catalog product -> catalog API (apiData, above)
-    //   /up/ user product    -> user-products API (its HTML has no date_created)
-    //   classic listing      -> the item's public description sub-resource
-    //                           (/items/{id} is 403, but .../description is open)
-    let date_created = apiData?.date_created ?? pageData.date_created_from_page ?? null;
-    if (!date_created && !effectiveCatalogId) {
-      const userProductId = userProductIdFromUrl(p.product_url);
-      const itemId = itemIdFromUrl(p.product_url);
-      if (userProductId) {
-        date_created = (await this.mlClient.getUserProduct(userProductId))?.date_created ?? null;
-      } else if (itemId) {
-        date_created = (await this.mlClient.getItemDate(itemId))?.date_created ?? null;
-      }
-    }
-
-    // Listing id (ml_public_id): prefer the scraped page; if it didn't yield one
-    // (render race / parser miss), fall back to the catalog API's buy-box winner.
-    // The API returns it site-prefixed ("MCO3975198228") — strip the prefix to
-    // match the page parser, which stores digits only.
-    const ml_public_id =
-      pageData.ml_public_id ??
-      (apiData?.buy_box_winner_item_id
-        ? apiData.buy_box_winner_item_id.replace(/^M[A-Z]{2}/, '')
-        : null);
-
-    let leaf_category_name: string | null = null;
-    if (pageData.leaf_category_id) {
-      leaf_category_name = await this.resolveLeafName(pageData.leaf_category_id, leafNameCache);
-    }
-
     return {
       name: p.name,
       price: p.price,
       product_url: p.product_url,
       ranking_position: p.ranking_position,
       catalog_id: effectiveCatalogId,
-      ml_public_id,
-      date_created,
+      ml_public_id: pageData.ml_public_id,
+      date_created_from_page: pageData.date_created_from_page,
       sold_count: pageData.sold_count,
-      rating: pageData.rating,
-      review_count: pageData.review_count,
       brand: pageData.brand,
       original_price: pageData.original_price,
       discount_pct: pageData.discount_pct,
@@ -216,7 +200,6 @@ export class CategoryFetchService {
       usd_original_price: toUsd(pageData.original_price, exchangeRate),
       holiday_name: holidayName,
       leaf_category_ml_id: pageData.leaf_category_id,
-      leaf_category_name,
       seller_ml_id: pageData.seller_ml_id,
       seller_nickname: pageData.seller_nickname,
       seller_is_official_store: pageData.seller_is_official_store,
@@ -225,4 +208,120 @@ export class CategoryFetchService {
       seller_total_sales: pageData.seller_total_sales,
     };
   }
+
+  /**
+   * PHASE 2 for one product: resolves `date_created`, the leaf category name,
+   * reviews and weekly visits via the ML API (all through the client's rate
+   * limiter), and recovers `ml_public_id` from the catalog buy-box winner when the
+   * page didn't yield one.
+   */
+  private async enrichOne(
+    item: EnrichInput,
+    leafNameCache: Map<string, string | null>,
+  ): Promise<EnrichResult> {
+    const apiData = item.catalog_id
+      ? await this.mlClient.getCatalogProduct(item.catalog_id)
+      : null;
+
+    // date_created from the cheapest source first (catalog API or page); if still
+    // missing and there is no catalog id, fall back by URL type:
+    //   /up/ user product -> user-products API · classic -> item description.
+    let date_created = apiData?.date_created ?? item.date_created_from_page ?? null;
+    if (!date_created && !item.catalog_id) {
+      const userProductId = userProductIdFromUrl(item.product_url);
+      const itemId = itemIdFromUrl(item.product_url);
+      if (userProductId) {
+        date_created = (await this.mlClient.getUserProduct(userProductId))?.date_created ?? null;
+      } else if (itemId) {
+        date_created = (await this.mlClient.getItemDate(itemId))?.date_created ?? null;
+      }
+    }
+
+    // Recover the listing id from the catalog buy-box winner when the page missed
+    // it. The API returns it site-prefixed ("MCO3975198228") — strip the prefix to
+    // match the page parser (digits only).
+    const ml_public_id =
+      item.ml_public_id ??
+      (apiData?.buy_box_winner_item_id
+        ? apiData.buy_box_winner_item_id.replace(/^M[A-Z]{2}/, '')
+        : null);
+
+    let leaf_category_name: string | null = null;
+    if (item.leaf_category_ml_id) {
+      leaf_category_name = await this.resolveLeafName(item.leaf_category_ml_id, leafNameCache);
+    }
+
+    // Demand signals, keyed by the listing id (siteId + ml_public_id). Open for
+    // ANY item (unlike /items/{id} which is 403 for non-owners).
+    let rating: number | null = null;
+    let review_count: number | null = null;
+    let review_levels: ReviewLevels | null = null;
+    let weekly_visits: number | null = null;
+    if (ml_public_id) {
+      const listingId = `${item.site_id}${ml_public_id}`;
+      const [reviews, visits] = await Promise.all([
+        this.mlClient.getItemReviews(listingId),
+        this.mlClient.getItemVisits(listingId),
+      ]);
+      rating = reviews?.rating ?? null;
+      review_count = reviews?.total ?? null;
+      review_levels = reviews?.levels ?? null;
+      weekly_visits = visits;
+    }
+
+    return { ml_public_id, date_created, leaf_category_name, rating, review_count, review_levels, weekly_visits };
+  }
+}
+
+/** Builds the phase-2 ML-enrichment input from a staged raw product. */
+function toEnrichInput(siteId: string, r: RawScrapedProduct): EnrichInput {
+  return {
+    site_id: siteId,
+    catalog_id: r.catalog_id,
+    ml_public_id: r.ml_public_id,
+    product_url: r.product_url,
+    leaf_category_ml_id: r.leaf_category_ml_id,
+    date_created_from_page: r.date_created_from_page,
+  };
+}
+
+/** Merges phase-1 raw + phase-2 enrichment into the final persist-ready product. */
+function mergeEnriched(raw: RawScrapedProduct, e: EnrichResult): EnrichedProduct {
+  return {
+    name: raw.name,
+    price: raw.price,
+    product_url: raw.product_url,
+    ranking_position: raw.ranking_position,
+    catalog_id: raw.catalog_id,
+    ml_public_id: e.ml_public_id ?? raw.ml_public_id,
+    date_created: e.date_created,
+    sold_count: raw.sold_count,
+    brand: raw.brand,
+    original_price: raw.original_price,
+    discount_pct: raw.discount_pct,
+    shipping_type: raw.shipping_type,
+    listing_type_id: raw.listing_type_id,
+    is_cbt: raw.is_cbt,
+    available_quantity: raw.available_quantity,
+    installments_quantity: raw.installments_quantity,
+    installments_amount: raw.installments_amount,
+    installments_interest_free: raw.installments_interest_free,
+    rating: e.rating,
+    review_count: e.review_count,
+    review_levels: e.review_levels,
+    weekly_visits: e.weekly_visits,
+    currency: raw.currency,
+    exchange_rate: raw.exchange_rate,
+    usd_price: raw.usd_price,
+    usd_original_price: raw.usd_original_price,
+    holiday_name: raw.holiday_name,
+    leaf_category_ml_id: raw.leaf_category_ml_id,
+    leaf_category_name: e.leaf_category_name,
+    seller_ml_id: raw.seller_ml_id,
+    seller_nickname: raw.seller_nickname,
+    seller_is_official_store: raw.seller_is_official_store,
+    seller_power_status: raw.seller_power_status,
+    seller_total_products: raw.seller_total_products,
+    seller_total_sales: raw.seller_total_sales,
+  };
 }

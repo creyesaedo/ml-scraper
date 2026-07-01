@@ -26,15 +26,14 @@ export interface ScrapedProduct {
   price: string;
   catalog_id: string | null;
   product_url: string | null;
-  ranking_position: number;
+  // 1-based best-sellers rank; `null` when scraped outside a ranking context.
+  ranking_position: number | null;
 }
 
 export type ShippingType = 'full' | 'cross_border' | 'free' | 'standard';
 
 export interface ProductEnrichment {
   sold_count: number | null;
-  rating: number | null;
-  review_count: number | null;
   brand: string | null;
   date_created_from_page: string | null;
   catalog_product_id_from_page: string | null;
@@ -59,8 +58,6 @@ export interface ProductEnrichment {
 
 export const EMPTY_ENRICHMENT: ProductEnrichment = {
   sold_count: null,
-  rating: null,
-  review_count: null,
   brand: null,
   date_created_from_page: null,
   catalog_product_id_from_page: null,
@@ -253,6 +250,58 @@ export function parseCategoryHtml(html: string): ScrapedProduct[] {
  * returned as digits only (matching parseCategoryHtml). Returns nulls on any
  * parse error so the caller still gets the enrichment.
  */
+// How far past the anchored winner price to look for ML's own rounded discount
+// label. The label lives in the winner's credit-pricing block (~280 chars after
+// the price in observed HTML); a tight window keeps a carousel's discount out.
+const DISCOUNT_LABEL_WINDOW = 600;
+
+/**
+ * Extracts the buy-box (winning offer) money fields from a PDP's inline state
+ * JSON, anchored on the one record that carries `price` + `original_price` +
+ * `currency_id` as ADJACENT flat numbers. Only the winning offer uses that shape;
+ * recommendation carousels and "other buying options" embed their prices as
+ * nested objects (`"price":{"value":N}`, `"previous_price":{"value":N}`), so this
+ * never latches onto a neighbouring product the way the old first-match-anywhere
+ * regexes did — which is exactly how a $139.990 catalog page reported a carousel's
+ * $219.990 as its "original price". ML repeats the winner across several state
+ * slices, all consistent, so the first flat match is authoritative.
+ *
+ * `discount_pct` prefers ML's own rounded label (`"discount":"26%"`) found right
+ * after the same winner price; absent that it is computed from the pair so a
+ * genuine markdown still surfaces. A product with no markdown yields a null
+ * original_price and null discount (the current price is still returned).
+ */
+export function parseBuyBoxPrice(html: string): {
+  price: number | null;
+  original_price: number | null;
+  discount_pct: number | null;
+} {
+  const m = html.match(
+    /"price"\s*:\s*(\d+)\s*,\s*"original_price"\s*:\s*(null|\d+)\s*,\s*"currency_id"\s*:\s*"[A-Z]{3}"/,
+  );
+  if (!m) return { price: null, original_price: null, discount_pct: null };
+
+  const priceNum = parseInt(m[1], 10);
+  const price = priceNum > 0 ? priceNum : null;
+  const originalNum = m[2] === 'null' ? NaN : parseInt(m[2], 10);
+  const original_price =
+    Number.isFinite(originalNum) && originalNum > 0 ? originalNum : null;
+
+  let discount_pct: number | null = null;
+  const labelMatch = html
+    .slice(m.index!, m.index! + DISCOUNT_LABEL_WINDOW)
+    .match(/"discount"\s*:\s*"(\d{1,3})%"/);
+  if (labelMatch) {
+    const n = parseInt(labelMatch[1], 10);
+    if (n > 0 && n <= 100) discount_pct = n;
+  } else if (price && original_price && original_price > price) {
+    const n = Math.round((1 - price / original_price) * 100);
+    if (n > 0 && n <= 100) discount_pct = n;
+  }
+
+  return { price, original_price, discount_pct };
+}
+
 export function parseProductBasicsFromHtml(html: string): {
   name: string | null;
   price: string | null;
@@ -260,8 +309,19 @@ export function parseProductBasicsFromHtml(html: string): {
   try {
     const $ = cheerio.load(html);
     const name = $('h1.ui-pdp-title').first().text().trim() || null;
+    // Price comes from the buy-box winner JSON (authoritative, discount-aware).
+    // The DOM is a fallback only — and it must SKIP the struck-through original,
+    // which renders first and carries the `--previous` modifier; taking
+    // `.first()` blindly reported the pre-discount price as the selling price.
+    const buyBoxPrice = parseBuyBoxPrice(html).price;
     const price =
-      $('.andes-money-amount__fraction').first().text().trim().replace(/\./g, '') || null;
+      buyBoxPrice != null
+        ? String(buyBoxPrice)
+        : $('.andes-money-amount:not(.andes-money-amount--previous) .andes-money-amount__fraction')
+            .first()
+            .text()
+            .trim()
+            .replace(/\./g, '') || null;
     return { name, price };
   } catch {
     return { name: null, price: null };
@@ -282,18 +342,17 @@ export function parseProductPageHtml(html: string): ProductEnrichment {
   // "vendidos" is identical in es and pt; only the magnitude word differs
   // (es "mil/millón/millones", pt "mil/milhão/milhões"), handled by MAGNITUDE.
   let sold_count: number | null = null;
-  const soldMatch = html.match(new RegExp(`\\+([\\d.,]+)\\s*${MAGNITUDE}?\\s*vendidos`, 'i'));
+  // The leading "+" is OPTIONAL: ML only renders it for large/bucketed counts
+  // ("+5 mil vendidos"); small exact counts show as plain "4 vendidos" (es) /
+  // "4 vendidos" (pt — same word). Requiring "+" silently dropped every low-sales
+  // product to null. The number must sit immediately before the badge word (only
+  // whitespace + the magnitude word may intervene), so this stays anchored to the
+  // sold badge and never grabs a stray number elsewhere on the page.
+  const soldMatch = html.match(new RegExp(`\\+?([\\d.,]+)\\s*${MAGNITUDE}?\\s*vendidos`, 'i'));
   if (soldMatch) sold_count = parseMagnitudeCount(soldMatch[1], soldMatch[2]);
 
-  let rating: number | null = null;
-  let review_count: number | null = null;
-  const reviewsMatch = html.match(
-    /"reviews"\s*:\s*\{"rating"\s*:\s*([\d.]+)\s*,\s*"amount"\s*:\s*(\d+)/,
-  );
-  if (reviewsMatch) {
-    rating = parseFloat(reviewsMatch[1]);
-    review_count = parseInt(reviewsMatch[2], 10);
-  }
+  // Reviews are no longer scraped here — rating/review_count/review_levels come
+  // from the ML official API (`/reviews/item/{id}`) in CategoryFetchService.
 
   let brand: string | null = null;
   const brandMatch = html.match(/"id"\s*:\s*"Marca"\s*,\s*"text"\s*:\s*"([^"]+)"/);
@@ -331,24 +390,10 @@ export function parseProductPageHtml(html: string): ProductEnrichment {
     }
   }
 
-  // Original price (previous_price.value just before current_price.value in the
-  // buy-box price block). Captured as a raw number — caller stores as decimal.
-  let original_price: number | null = null;
-  const previousPriceMatch = html.match(
-    /"previous_price"\s*:\s*\{\s*"value"\s*:\s*([\d.]+)/,
-  );
-  if (previousPriceMatch) {
-    const n = parseFloat(previousPriceMatch[1]);
-    if (Number.isFinite(n)) original_price = n;
-  }
-
-  // Discount percentage shown on the buy-box ("discount":{"value":34}).
-  let discount_pct: number | null = null;
-  const discountMatch = html.match(/"discount"\s*:\s*\{\s*"value"\s*:\s*(\d{1,3})\s*\}/);
-  if (discountMatch) {
-    const n = parseInt(discountMatch[1], 10);
-    if (Number.isFinite(n) && n > 0 && n <= 100) discount_pct = n;
-  }
+  // Original price + discount come from the buy-box winner record (see
+  // parseBuyBoxPrice), anchored so they can't pick up a recommendation carousel's
+  // numbers the way the old un-anchored first-match regexes did.
+  const { original_price, discount_pct } = parseBuyBoxPrice(html);
 
   // Shipping type — derived from the icon shown in the buy-box "shipping" block.
   // Priority: full > cross_border > free > standard.
@@ -413,8 +458,6 @@ export function parseProductPageHtml(html: string): ProductEnrichment {
 
   return {
     sold_count,
-    rating,
-    review_count,
     brand,
     date_created_from_page,
     catalog_product_id_from_page,

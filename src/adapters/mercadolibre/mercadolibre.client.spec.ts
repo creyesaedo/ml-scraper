@@ -12,6 +12,11 @@ function makeClient(creds: { id?: string; secret?: string } = {}) {
     mlBaseUrl: 'https://api.mercadolibre.com',
     mlClientId: creds.id ?? '',
     mlClientSecret: creds.secret ?? '',
+    // limitedGet reads these: a high rate keeps the limiter from sleeping in tests,
+    // and a non-undefined retry budget lets the request loop actually run (an
+    // undefined budget makes `attempt <= undefined` false → the loop is skipped).
+    mlApiRateLimitPerSec: 1000,
+    mlApiMaxRetries: 2,
   } as any;
   const client = new MercadoLibreClient(config);
   return { client, http };

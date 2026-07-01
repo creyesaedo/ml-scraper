@@ -2,6 +2,8 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ConfigType } from '@nestjs/config';
 import axios, { AxiosInstance } from 'axios';
 import appConfig from '../../config/app.config';
+import { ReviewLevels } from '../../worker/enriched-product.dto';
+import { MlRateLimiter, mlBackoffMs, sleep } from './ml-rate-limiter';
 
 const TOKEN_URL = 'https://api.mercadolibre.com/oauth/token';
 const TOKEN_MARGIN_MS = 60_000;
@@ -25,6 +27,8 @@ interface TokenResponse {
 export class MercadoLibreClient {
   private readonly logger = new Logger(MercadoLibreClient.name);
   private readonly http: AxiosInstance;
+  // Global pacer for every ML API GET — keeps the worker under ML's 25 req/s cap.
+  private readonly limiter: MlRateLimiter;
   private accessToken: string | null = null;
   // Absolute time (from performance.now(), a monotonic clock) after which the
   // cached token must be renewed. Monotonic so it is immune to system clock changes.
@@ -39,6 +43,43 @@ export class MercadoLibreClient {
       timeout: TIMEOUT_MS,
       headers: { 'User-Agent': 'MarketAnalysis/2.0' },
     });
+    this.limiter = new MlRateLimiter(config.mlApiRateLimitPerSec);
+  }
+
+  /**
+   * GET against the ML API through the global rate limiter, with retry+backoff on
+   * 429/5xx/network (and a one-shot token refresh on 401). Throws after the retry
+   * budget; the public methods catch and map to null. Genuine 4xx (403/404/410)
+   * are NOT retried — they are real verdicts (e.g. a delisted item's visits 404),
+   * surfaced immediately. This is what keeps a transient 429 from silently nulling
+   * review/visit data.
+   */
+  private async limitedGet<T>(path: string): Promise<T> {
+    await this.ensureToken();
+    let lastErr: unknown;
+    for (let attempt = 0; attempt <= this.config.mlApiMaxRetries; attempt++) {
+      await this.limiter.acquire();
+      try {
+        const resp = await this.http.get<T>(path, { headers: this.authHeaders() });
+        return resp.data;
+      } catch (err) {
+        lastErr = err;
+        const status = axios.isAxiosError(err) ? err.response?.status : undefined;
+        const retryable =
+          !axios.isAxiosError(err)
+            ? false
+            : status === undefined || status === 429 || status === 401 || (status >= 500 && status < 600);
+        if (attempt >= this.config.mlApiMaxRetries || !retryable) throw err;
+        if (status === 401) {
+          // Token expired/invalid: force a refresh, then retry without backoff.
+          this.accessToken = null;
+          await this.ensureToken();
+        } else {
+          await sleep(mlBackoffMs(attempt));
+        }
+      }
+    }
+    throw lastErr;
   }
 
   /**
@@ -87,39 +128,34 @@ export class MercadoLibreClient {
 
   /** Lists every MercadoLibre site (one per country, e.g. MLA, MLB, MLC). */
   async getSites(): Promise<Array<{ id: string; name: string }>> {
-    await this.ensureToken();
-    const resp = await this.http.get<Array<{ id: string; name: string }>>('/sites', {
-      headers: this.authHeaders(),
-    });
-    return resp.data;
+    return this.limitedGet<Array<{ id: string; name: string }>>('/sites');
   }
 
   /** Returns the top-level (root) categories for a given site. */
   async getSiteCategories(
     siteId: string,
   ): Promise<Array<{ id: string; name: string }>> {
-    await this.ensureToken();
-    const resp = await this.http.get<Array<{ id: string; name: string }>>(
-      `/sites/${siteId}/categories`,
-      { headers: this.authHeaders() },
-    );
-    return resp.data;
+    return this.limitedGet<Array<{ id: string; name: string }>>(`/sites/${siteId}/categories`);
   }
 
   /**
-   * Fetches a single category (its name and child categories) by ML id.
+   * Fetches a single category (its name, child categories, and the ancestor
+   * chain from the site root down to it) by ML id. `path_from_root` is ordered
+   * root → leaf, so `[0]` is the site root category — used to attach an
+   * on-demand single product to the right root when its leaf isn't cached yet.
    * Returns null if the request fails, so callers can skip it without crashing.
    */
-  async getCategory(
-    categoryId: string,
-  ): Promise<{ name: string; children_categories: Array<{ id: string; name: string }> } | null> {
-    await this.ensureToken();
+  async getCategory(categoryId: string): Promise<{
+    name: string;
+    children_categories: Array<{ id: string; name: string }>;
+    path_from_root: Array<{ id: string; name: string }>;
+  } | null> {
     try {
-      const resp = await this.http.get<{
+      return await this.limitedGet<{
         name: string;
         children_categories: Array<{ id: string; name: string }>;
-      }>(`/categories/${categoryId}`, { headers: this.authHeaders() });
-      return resp.data;
+        path_from_root: Array<{ id: string; name: string }>;
+      }>(`/categories/${categoryId}`);
     } catch (err) {
       this.logger.warn(`getCategory(${categoryId}) failed: ${errorMessage(err)}`);
       return null;
@@ -137,15 +173,14 @@ export class MercadoLibreClient {
   async getCatalogProduct(
     catalogId: string,
   ): Promise<{ date_created: string; buy_box_winner_item_id: string | null } | null> {
-    await this.ensureToken();
     try {
-      const resp = await this.http.get<{
+      const data = await this.limitedGet<{
         date_created: string;
         buy_box_winner?: { item_id?: string | null } | null;
-      }>(`/products/${catalogId}`, { headers: this.authHeaders() });
+      }>(`/products/${catalogId}`);
       return {
-        date_created: resp.data.date_created,
-        buy_box_winner_item_id: resp.data.buy_box_winner?.item_id ?? null,
+        date_created: data.date_created,
+        buy_box_winner_item_id: data.buy_box_winner?.item_id ?? null,
       };
     } catch (err) {
       this.logger.warn(`getCatalogProduct(${catalogId}) failed: ${errorMessage(err)}`);
@@ -162,13 +197,11 @@ export class MercadoLibreClient {
   async getUserProduct(
     userProductId: string,
   ): Promise<{ date_created: string | null } | null> {
-    await this.ensureToken();
     try {
-      const resp = await this.http.get<{ date_created?: string | null }>(
+      const data = await this.limitedGet<{ date_created?: string | null }>(
         `/user-products/${userProductId}`,
-        { headers: this.authHeaders() },
       );
-      return { date_created: resp.data.date_created ?? null };
+      return { date_created: data.date_created ?? null };
     } catch (err) {
       this.logger.warn(`getUserProduct(${userProductId}) failed: ${errorMessage(err)}`);
       return null;
@@ -185,15 +218,71 @@ export class MercadoLibreClient {
    * null on failure so a single missing product never aborts the sync.
    */
   async getItemDate(itemId: string): Promise<{ date_created: string | null } | null> {
-    await this.ensureToken();
     try {
-      const resp = await this.http.get<{ date_created?: string | null }>(
+      const data = await this.limitedGet<{ date_created?: string | null }>(
         `/items/${itemId}/description`,
-        { headers: this.authHeaders() },
       );
-      return { date_created: resp.data.date_created ?? null };
+      return { date_created: data.date_created ?? null };
     } catch (err) {
       this.logger.warn(`getItemDate(${itemId}) failed: ${errorMessage(err)}`);
+      return null;
+    }
+  }
+
+  /**
+   * Visits in the trailing 7 days for a listing, via the public time-window
+   * endpoint (`/items/{id}/visits/time_window?last=1&unit=week`). Unlike
+   * `/items/{id}` (403 for non-owners), visits are open for ANY item, so this
+   * works for competitors too — a render-independent demand proxy. Returns null
+   * on failure so a single missing product never aborts the sync.
+   */
+  async getItemVisits(itemId: string): Promise<number | null> {
+    try {
+      const data = await this.limitedGet<{ total_visits?: number | null }>(
+        `/items/${itemId}/visits/time_window?last=1&unit=week`,
+      );
+      return data.total_visits ?? null;
+    } catch (err) {
+      this.logger.warn(`getItemVisits(${itemId}) failed: ${errorMessage(err)}`);
+      return null;
+    }
+  }
+
+  /**
+   * Aggregated reviews for a listing via the public `/reviews/item/{id}`
+   * endpoint: the average rating, the per-listing total, and the per-star
+   * breakdown. This is the official-API replacement for the page-scraped
+   * rating/review_count — it works for third-party items too. Returns null on
+   * failure so a single missing product never aborts the sync.
+   */
+  async getItemReviews(
+    itemId: string,
+  ): Promise<{ rating: number | null; total: number | null; levels: ReviewLevels | null } | null> {
+    try {
+      const data = await this.limitedGet<{
+        rating_average?: number | null;
+        paging?: { total?: number | null } | null;
+        rating_levels?: Partial<ReviewLevels> | null;
+      }>(`/reviews/item/${itemId}`);
+      // A 200 response is authoritative: an item with no reviews returns
+      // `paging.total: 0` + all-zero `rating_levels`. So on success we always
+      // yield numbers (total → 0, levels → zero-object), never null. `null` is
+      // reserved for a real fetch failure (the catch below), so the caller can
+      // tell "0 reviews" (a value to show) apart from "couldn't fetch".
+      const lv = data.rating_levels;
+      return {
+        rating: data.rating_average ?? null,
+        total: data.paging?.total ?? 0,
+        levels: {
+          one_star: lv?.one_star ?? 0,
+          two_star: lv?.two_star ?? 0,
+          three_star: lv?.three_star ?? 0,
+          four_star: lv?.four_star ?? 0,
+          five_star: lv?.five_star ?? 0,
+        },
+      };
+    } catch (err) {
+      this.logger.warn(`getItemReviews(${itemId}) failed: ${errorMessage(err)}`);
       return null;
     }
   }

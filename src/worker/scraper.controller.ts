@@ -7,11 +7,21 @@ import {
   ScraperHealthService,
 } from '../adapters/scraper/scraper-health.service';
 import { CategoryFetchService } from './category-fetch.service';
-import { EnrichedProduct, ProbeVerdict } from './enriched-product.dto';
+import {
+  EnrichedProduct,
+  EnrichInput,
+  EnrichResult,
+  ProbeVerdict,
+  RawScrapedProduct,
+} from './enriched-product.dto';
 
 interface ScrapeProductBody {
   url: string;
   siteId?: string;
+}
+
+interface EnrichBody {
+  items: EnrichInput[];
 }
 
 /**
@@ -43,6 +53,33 @@ export class ScraperController {
   ): Promise<{ products: EnrichedProduct[] }> {
     return this.runOrAbort(async () => ({
       products: await this.fetchService.fetchEnrichedCategory(siteId.toUpperCase(), categoryId),
+    }));
+  }
+
+  /**
+   * PHASE 1: one category scraped to RAW (Decodo + page parse + FX + holiday, no
+   * ML API). ml-service stages these and enriches them later via POST /enrich.
+   */
+  @Post('scrape/category/:siteId/:categoryId/raw')
+  async scrapeCategoryRaw(
+    @Param('siteId') siteId: string,
+    @Param('categoryId') categoryId: string,
+  ): Promise<{ products: RawScrapedProduct[] }> {
+    return this.runOrAbort(async () => ({
+      products: await this.fetchService.fetchRawCategory(siteId.toUpperCase(), categoryId),
+    }));
+  }
+
+  /**
+   * PHASE 2: ML-API enrichment for a batch of staged products (date_created, leaf
+   * name, reviews, weekly visits). Paced internally by the client's global ML rate
+   * limiter, so ml-service can send large batches without tripping ML's 25 req/s.
+   */
+  @Post('enrich')
+  async enrich(@Body() body: EnrichBody): Promise<{ results: EnrichResult[] }> {
+    const items = body?.items ?? [];
+    return this.runOrAbort(async () => ({
+      results: await this.fetchService.enrichProducts(items),
     }));
   }
 
@@ -78,6 +115,19 @@ export class ScraperController {
     @Param('siteId') siteId: string,
   ): Promise<Array<{ id: string; name: string }>> {
     return this.mlClient.getSiteCategories(siteId.toUpperCase());
+  }
+
+  /**
+   * A category's ancestor chain (root → leaf) via the ML official API. Lets
+   * ml-service resolve the root of an on-demand single product whose leaf isn't
+   * cached yet. `[]` when ML has no record (caller decides how to handle it).
+   */
+  @Get('ml/category/:categoryId')
+  async getCategoryPath(
+    @Param('categoryId') categoryId: string,
+  ): Promise<{ path_from_root: Array<{ id: string; name: string }> }> {
+    const category = await this.mlClient.getCategory(categoryId);
+    return { path_from_root: category?.path_from_root ?? [] };
   }
 
   /**

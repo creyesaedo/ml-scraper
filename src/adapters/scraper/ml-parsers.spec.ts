@@ -3,7 +3,9 @@ import {
   SITE_DOMAINS,
   SITE_GEO,
   categoryUrl,
+  parseBuyBoxPrice,
   parseCategoryHtml,
+  parseProductBasicsFromHtml,
   parseProductPageHtml,
   siteHasBestSellers,
   itemIdFromUrl,
@@ -136,6 +138,26 @@ describe('ml-parsers', () => {
       expect(parseProductPageHtml('+2 millón vendidos').sold_count).toBe(2_000_000);
     });
 
+    it('parses a small exact count with no "+" prefix (es)', () => {
+      // ML omits the "+" for low exact counts: "Nuevo | 4 vendidos".
+      expect(parseProductPageHtml('Nuevo | 4 vendidos').sold_count).toBe(4);
+    });
+
+    it('parses a small exact count with no "+" prefix (pt — same word)', () => {
+      // Brazil uses the same "vendidos" badge: "Novo | 12 vendidos".
+      expect(parseProductPageHtml('Novo | 12 vendidos').sold_count).toBe(12);
+    });
+
+    it('parses a no-"+" count with a thousands separator', () => {
+      expect(parseProductPageHtml('1.234 vendidos').sold_count).toBe(1234);
+    });
+
+    it('does not grab the seller "vendas/ventas" total as sold_count', () => {
+      // Seller total sales uses a DIFFERENT word, so making "+" optional must not
+      // let "+100 mil vendas" leak into sold_count.
+      expect(parseProductPageHtml('+100 mil vendas').sold_count).toBeNull();
+    });
+
     it('is null when the badge is absent', () => {
       expect(parseProductPageHtml('no sales badge').sold_count).toBeNull();
     });
@@ -143,14 +165,13 @@ describe('ml-parsers', () => {
 
   describe('parseProductPageHtml — full page', () => {
     const html = [
-      '"reviews":{"rating":4.5,"amount":120}',
       '"id":"Marca","text":"Apple"',
       '"date_created":"2023-01-15T10:00:00.000Z"',
       '"catalogProductId":"MLC987654"',
       '"categoryId":"MLC1055"',
       'Publicación #123456789',
-      '"previous_price":{"value":1599990}',
-      '"discount":{"value":34}',
+      '"price":1055990,"original_price":1599990,"currency_id":"CLP"',
+      '"actual_price":1055990,"discount":"34%"',
       '"icon_id":"vpp_full_icon"',
       '"listing_type_id":"gold_pro"',
       '"cbt_summary":{}',
@@ -167,10 +188,6 @@ describe('ml-parsers', () => {
 
     const e = parseProductPageHtml(html);
 
-    it('extracts reviews', () => {
-      expect(e.rating).toBe(4.5);
-      expect(e.review_count).toBe(120);
-    });
     it('extracts brand', () => expect(e.brand).toBe('Apple'));
     it('extracts date_created', () =>
       expect(e.date_created_from_page).toBe('2023-01-15T10:00:00.000Z'));
@@ -197,6 +214,73 @@ describe('ml-parsers', () => {
       expect(e.seller_power_status).toBe('platinum');
       expect(e.seller_total_products).toBe(100);
       expect(e.seller_total_sales).toBe(5000);
+    });
+  });
+
+  describe('parseBuyBoxPrice — anchors on the winning offer', () => {
+    // Models a real PDP: recommendation carousels (nested `{value}` shapes) come
+    // FIRST in document order, the flat buy-box triple comes later. The old
+    // first-match regexes reported the carousel's $219.990 as the original price;
+    // the anchored parser must read only the winner.
+    const html = [
+      // decoy carousel cards — must be ignored
+      '"previous_price":{"value":219990}',
+      '"price":{"value":159990},"current_price":{"value":159990}',
+      '"discount":"40%"',
+      // the actual buy-box winner
+      '"price":139990,"original_price":189990,"currency_id":"CLP"',
+      '"actual_price":139990,"discount":"26%"',
+    ].join(' ');
+
+    const bb = parseBuyBoxPrice(html);
+
+    it('takes the winner current price, not the struck-through one', () =>
+      expect(bb.price).toBe(139990));
+    it('takes the winner original price, not a carousel previous_price', () =>
+      expect(bb.original_price).toBe(189990));
+    it("uses ML's own rounded discount label scoped to the winner", () =>
+      expect(bb.discount_pct).toBe(26));
+
+    it('computes the discount when no label is present', () => {
+      const e = parseBuyBoxPrice('"price":7000,"original_price":10000,"currency_id":"CLP"');
+      expect(e.discount_pct).toBe(30);
+    });
+
+    it('returns nulls for original/discount on a non-discounted product', () => {
+      const e = parseBuyBoxPrice('"price":9990,"original_price":null,"currency_id":"CLP"');
+      expect(e.price).toBe(9990);
+      expect(e.original_price).toBeNull();
+      expect(e.discount_pct).toBeNull();
+    });
+
+    it('returns all nulls when no winner record is present', () => {
+      expect(parseBuyBoxPrice('"price":{"value":159990}')).toEqual({
+        price: null,
+        original_price: null,
+        discount_pct: null,
+      });
+    });
+  });
+
+  describe('parseProductBasicsFromHtml — price', () => {
+    it('reads the buy-box current price, never the struck-through original', () => {
+      const html = [
+        '<h1 class="ui-pdp-title">Smart TV</h1>',
+        '<s class="andes-money-amount andes-money-amount--previous">',
+        '<span class="andes-money-amount__fraction">189.990</span></s>',
+        '<span class="andes-money-amount"><span class="andes-money-amount__fraction">139.990</span></span>',
+        '"price":139990,"original_price":189990,"currency_id":"CLP"',
+      ].join('');
+      expect(parseProductBasicsFromHtml(html).price).toBe('139990');
+    });
+
+    it('falls back to the non-previous DOM fraction when no winner JSON exists', () => {
+      const html = [
+        '<s class="andes-money-amount andes-money-amount--previous">',
+        '<span class="andes-money-amount__fraction">189.990</span></s>',
+        '<span class="andes-money-amount"><span class="andes-money-amount__fraction">139.990</span></span>',
+      ].join('');
+      expect(parseProductBasicsFromHtml(html).price).toBe('139990');
     });
   });
 

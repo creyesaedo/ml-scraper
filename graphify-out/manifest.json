@@ -1,0 +1,197 @@
+{
+  "nest-cli.json": {
+    "mtime": 1781660566.0,
+    "ast_hash": "b6c9c4b64b7092bea720263a47b574cf",
+    "semantic_hash": "b6c9c4b64b7092bea720263a47b574cf"
+  },
+  "package.json": {
+    "mtime": 1782093760.0,
+    "ast_hash": "731c144d7c48d71cebeafff0635bbead",
+    "semantic_hash": "731c144d7c48d71cebeafff0635bbead"
+  },
+  "src/adapters/exchange/exchange-rate.client.spec.ts": {
+    "mtime": 1781662025.0,
+    "ast_hash": "c4bed0365ea3f44f07f7dd1fa67d41a1",
+    "semantic_hash": "c4bed0365ea3f44f07f7dd1fa67d41a1"
+  },
+  "src/adapters/exchange/exchange-rate.client.ts": {
+    "mtime": 1781662025.0,
+    "ast_hash": "186e63fc3727b1f3200f39fdf3f35a4c",
+    "semantic_hash": "186e63fc3727b1f3200f39fdf3f35a4c"
+  },
+  "src/adapters/exchange/exchange.module.ts": {
+    "mtime": 1781662025.0,
+    "ast_hash": "ab23761ecd946c47d44460d3ab7c0609",
+    "semantic_hash": "ab23761ecd946c47d44460d3ab7c0609"
+  },
+  "src/adapters/holidays/holidays.client.spec.ts": {
+    "mtime": 1781662025.0,
+    "ast_hash": "026d82802c2f5f161a3c749e456ab813",
+    "semantic_hash": "026d82802c2f5f161a3c749e456ab813"
+  },
+  "src/adapters/holidays/holidays.client.ts": {
+    "mtime": 1781662025.0,
+    "ast_hash": "d3b49590416d2fc3ec55581f5702d2f4",
+    "semantic_hash": "d3b49590416d2fc3ec55581f5702d2f4"
+  },
+  "src/adapters/holidays/holidays.module.ts": {
+    "mtime": 1781662025.0,
+    "ast_hash": "5b3cd84ae5931b39f72dd226ed635597",
+    "semantic_hash": "5b3cd84ae5931b39f72dd226ed635597"
+  },
+  "src/adapters/mercadolibre/mercadolibre.client.spec.ts": {
+    "mtime": 1782480930.5052445,
+    "ast_hash": "e6bca70f86babea65038f63cc265d61b",
+    "semantic_hash": ""
+  },
+  "src/adapters/mercadolibre/mercadolibre.client.ts": {
+    "mtime": 1782421913.2577934,
+    "ast_hash": "600522c09aff6396f905165ff1c4b1fe",
+    "semantic_hash": ""
+  },
+  "src/adapters/mercadolibre/mercadolibre.module.ts": {
+    "mtime": 1781662025.0,
+    "ast_hash": "da92d9533aa78c4df1b56ae461aef7c2",
+    "semantic_hash": "da92d9533aa78c4df1b56ae461aef7c2"
+  },
+  "src/adapters/scraper/adaptive-limiter.spec.ts": {
+    "mtime": 1782314928.0,
+    "ast_hash": "23ae503a44f1c4ce359d8f5ab6c525b0",
+    "semantic_hash": "23ae503a44f1c4ce359d8f5ab6c525b0"
+  },
+  "src/adapters/scraper/adaptive-limiter.ts": {
+    "mtime": 1782314762.0,
+    "ast_hash": "dcab55671cc58059a70efc9259ecc358",
+    "semantic_hash": "dcab55671cc58059a70efc9259ecc358"
+  },
+  "src/adapters/scraper/ml-parsers.spec.ts": {
+    "mtime": 1782486891.295177,
+    "ast_hash": "68ad444f7d71c04128dc3b6547c2a3d5",
+    "semantic_hash": ""
+  },
+  "src/adapters/scraper/ml-parsers.ts": {
+    "mtime": 1782486839.3051229,
+    "ast_hash": "9e14dd4058ee22f7d944aeaa1381add2",
+    "semantic_hash": ""
+  },
+  "src/adapters/scraper/ml-scraper.service.spec.ts": {
+    "mtime": 1782318123.0,
+    "ast_hash": "6982be41e282ba5e9f5d2fd6446ba5a8",
+    "semantic_hash": "6982be41e282ba5e9f5d2fd6446ba5a8"
+  },
+  "src/adapters/scraper/ml-scraper.service.ts": {
+    "mtime": 1782332945.0,
+    "ast_hash": "a4fc54de232278ad032023ee92c555b6",
+    "semantic_hash": "a4fc54de232278ad032023ee92c555b6"
+  },
+  "src/adapters/scraper/scraper-health.service.spec.ts": {
+    "mtime": 1781662025.0,
+    "ast_hash": "042fbcfcad22c511751b9c730c4a64c7",
+    "semantic_hash": "042fbcfcad22c511751b9c730c4a64c7"
+  },
+  "src/adapters/scraper/scraper-health.service.ts": {
+    "mtime": 1781662025.0,
+    "ast_hash": "ff8a7c647e233f4dc11de71c2394f741",
+    "semantic_hash": "ff8a7c647e233f4dc11de71c2394f741"
+  },
+  "src/adapters/scraper/scraper-semaphore.provider.ts": {
+    "mtime": 1782314828.0,
+    "ast_hash": "48cfb206b9f95b935de9d9c94b06c6dc",
+    "semantic_hash": "48cfb206b9f95b935de9d9c94b06c6dc"
+  },
+  "src/adapters/scraper/scraper.module.ts": {
+    "mtime": 1781662025.0,
+    "ast_hash": "0f7bb2d1cd9a7f1a9eebaefce0e510d6",
+    "semantic_hash": "0f7bb2d1cd9a7f1a9eebaefce0e510d6"
+  },
+  "src/app.controller.ts": {
+    "mtime": 1781662025.0,
+    "ast_hash": "e330587c02df4eda136e25134931a095",
+    "semantic_hash": "e330587c02df4eda136e25134931a095"
+  },
+  "src/app.module.ts": {
+    "mtime": 1782093760.0,
+    "ast_hash": "784b1595e52712ccee4d4f68aa89bcbb",
+    "semantic_hash": "784b1595e52712ccee4d4f68aa89bcbb"
+  },
+  "src/common/all-exceptions.filter.ts": {
+    "mtime": 1782093760.0,
+    "ast_hash": "67d5f0050ee6977d51e72b7bc57e14c2",
+    "semantic_hash": "67d5f0050ee6977d51e72b7bc57e14c2"
+  },
+  "src/config/app.config.spec.ts": {
+    "mtime": 1782318146.0,
+    "ast_hash": "dbb82d4ccb2e3b0ff09659b60b1424d8",
+    "semantic_hash": "dbb82d4ccb2e3b0ff09659b60b1424d8"
+  },
+  "src/config/app.config.ts": {
+    "mtime": 1782421756.3052058,
+    "ast_hash": "abe816ddc10ce49fe3c9703fbadf93d5",
+    "semantic_hash": ""
+  },
+  "src/main.ts": {
+    "mtime": 1782093760.0,
+    "ast_hash": "44b5e331dad0f487baaf521ce09245b3",
+    "semantic_hash": "44b5e331dad0f487baaf521ce09245b3"
+  },
+  "src/worker/category-fetch.service.ts": {
+    "mtime": 1782422060.5599585,
+    "ast_hash": "a36f8723f784304a6a357d0522fa025f",
+    "semantic_hash": ""
+  },
+  "src/worker/enriched-product.dto.ts": {
+    "mtime": 1782421720.861298,
+    "ast_hash": "4a642c8bc5530ca7dfa998190f87bd45",
+    "semantic_hash": ""
+  },
+  "src/worker/scraper.controller.ts": {
+    "mtime": 1782422083.7733948,
+    "ast_hash": "3628f5bc343fecd12ba206e659433dc7",
+    "semantic_hash": ""
+  },
+  "src/worker/worker.module.ts": {
+    "mtime": 1782093760.0,
+    "ast_hash": "26d78ad3aae21ab70f378b88648614f2",
+    "semantic_hash": "26d78ad3aae21ab70f378b88648614f2"
+  },
+  "test/jest.setup.ts": {
+    "mtime": 1781662025.0,
+    "ast_hash": "fd79770b66916e41402e21d47f1bbfaf",
+    "semantic_hash": "fd79770b66916e41402e21d47f1bbfaf"
+  },
+  "tsconfig.build.json": {
+    "mtime": 1782093760.0,
+    "ast_hash": "f73d0f011ee462dcdf7f02bbdcde284b",
+    "semantic_hash": "f73d0f011ee462dcdf7f02bbdcde284b"
+  },
+  "tsconfig.json": {
+    "mtime": 1782022647.0,
+    "ast_hash": "a991601d39823aed3c012e639f7fed68",
+    "semantic_hash": "a991601d39823aed3c012e639f7fed68"
+  },
+  "scripts/probe-sold.mjs": {
+    "mtime": 1782406114.222643,
+    "ast_hash": "d32c7071c785f3d3df779a42ecbd61e4",
+    "semantic_hash": ""
+  },
+  "src/adapters/mercadolibre/ml-rate-limiter.ts": {
+    "mtime": 1782421739.4226482,
+    "ast_hash": "a7d866235cb291ba0c2a0db36178afb8",
+    "semantic_hash": ""
+  },
+  "CLAUDE.md": {
+    "mtime": 1782332975.0,
+    "ast_hash": "70e9c01f5c1a6191fcf11997de9de140",
+    "semantic_hash": ""
+  },
+  "README.md": {
+    "mtime": 1782093760.0,
+    "ast_hash": "5fe24c1f79cce5257fa70e79f13a504f",
+    "semantic_hash": ""
+  },
+  "docker-compose.yml": {
+    "mtime": 1782093760.0,
+    "ast_hash": "9d9b8e6a4412aeb5186bfd151570eb48",
+    "semantic_hash": ""
+  }
+}

@@ -4,6 +4,8 @@ export interface AppConfig {
   mlClientId: string;
   mlClientSecret: string;
   mlBaseUrl: string;
+  mlApiRateLimitPerSec: number;
+  mlApiMaxRetries: number;
   decodoApiToken: string;
   decodoRateLimitPerSec: number;
   decodoTransientMaxRetries: number;
@@ -78,6 +80,13 @@ export default registerAs(
       mlClientId: process.env.ML_CLIENT_ID ?? '',
       mlClientSecret: process.env.ML_CLIENT_SECRET ?? '',
       mlBaseUrl: process.env.ML_BASE_URL ?? 'https://api.mercadolibre.com',
+      // ML official API caps at 1500 req/min = 25 req/s per app; over it returns
+      // 429 with an empty body. Default below the ceiling for headroom; the single
+      // global pacer for every ML call. Re-point if ML changes the cap.
+      mlApiRateLimitPerSec: Math.max(1, parseInt(process.env.ML_API_RATE_LIMIT_PER_SEC ?? '20', 10)),
+      // Retries (backoff) for a 429/5xx/network ML response before giving up and
+      // returning null. Keeps a transient throttle from silently nulling data.
+      mlApiMaxRetries: Math.max(0, parseInt(process.env.ML_API_MAX_RETRIES ?? '5', 10)),
       decodoApiToken: process.env.DECODO_API_TOKEN ?? '',
       decodoRateLimitPerSec,
       // How many times to retry a transient Decodo-side soft failure — HTTP 400
